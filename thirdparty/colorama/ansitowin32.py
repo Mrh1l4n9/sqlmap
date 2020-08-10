@@ -46,8 +46,8 @@ class AnsiToWin32(object):
     sequences from the text, and if outputting to a tty, will convert them into
     win32 function calls.
     '''
-    ANSI_CSI_RE = re.compile('\001?\033\[((?:\d|;)*)([a-zA-Z])\002?')     # Control Sequence Introducer
-    ANSI_OSC_RE = re.compile('\001?\033\]((?:.|;)*?)(\x07)\002?')         # Operating System Command
+    ANSI_CSI_RE = re.compile('\001?\033\\[((?:\\d|;)*)([a-zA-Z])\002?')     # Control Sequence Introducer
+    ANSI_OSC_RE = re.compile('\001?\033\\]([^\a]*)(\a)\002?')               # Operating System Command (Note: https://github.com/tartley/colorama/issues/247)
 
     def __init__(self, wrapped, convert=None, strip=None, autoreset=False):
         # The wrapped stream (normally sys.stdout or sys.stderr)
@@ -180,10 +180,12 @@ class AnsiToWin32(object):
     def _write(self, text, retry=5):
         try:
             self.wrapped.write(text)
-        except IOError, err:
+        except IOError as err:
             if not (err.errno == 0 and retry > 0):
                 raise
             self._write(text, retry-1)
+        except UnicodeError:
+            self.wrapped.write('?')
 
     def convert_ansi(self, paramstring, command):
         if self.convert:

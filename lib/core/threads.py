@@ -1,22 +1,27 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
 
+from __future__ import print_function
+
 import difflib
-import random
 import threading
 import time
 import traceback
 
+from lib.core.compat import WichmannHill
+from lib.core.compat import xrange
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
 from lib.core.datatype import AttribDict
 from lib.core.enums import PAYLOAD
+from lib.core.exception import SqlmapBaseException
 from lib.core.exception import SqlmapConnectionException
+from lib.core.exception import SqlmapSkipTargetException
 from lib.core.exception import SqlmapThreadException
 from lib.core.exception import SqlmapUserQuitException
 from lib.core.exception import SqlmapValueException
@@ -46,19 +51,20 @@ class _ThreadData(threading.local):
         self.lastComparisonHeaders = None
         self.lastComparisonCode = None
         self.lastComparisonRatio = None
-        self.lastErrorPage = None
+        self.lastErrorPage = tuple()
         self.lastHTTPError = None
         self.lastRedirectMsg = None
         self.lastQueryDuration = 0
         self.lastPage = None
         self.lastRequestMsg = None
         self.lastRequestUID = 0
-        self.lastRedirectURL = None
-        self.random = random.WichmannHill()
+        self.lastRedirectURL = tuple()
+        self.random = WichmannHill()
         self.resumed = False
         self.retriesCount = 0
         self.seqMatcher = difflib.SequenceMatcher(None)
         self.shared = shared
+        self.technique = None
         self.validationRun = 0
         self.valueStack = []
 
@@ -68,12 +74,14 @@ def readInput(message, default=None, checkBatch=True, boolean=False):
     # It will be overwritten by original from lib.core.common
     pass
 
+def isDigit(value):
+    # It will be overwritten by original from lib.core.common
+    pass
+
 def getCurrentThreadData():
     """
     Returns current thread's local data
     """
-
-    global ThreadData
 
     return ThreadData
 
@@ -91,11 +99,14 @@ def exceptionHandledFunction(threadFunction, silent=False):
         kb.threadContinue = False
         kb.threadException = True
         raise
-    except Exception, ex:
-        if not silent:
-            logger.error("thread %s: %s" % (threading.currentThread().getName(), ex.message))
+    except Exception as ex:
+        from lib.core.common import getSafeExString
 
-            if conf.verbose > 1:
+        if not silent and kb.get("threadContinue") and not kb.get("multipleCtrlC") and not isinstance(ex, (SqlmapUserQuitException, SqlmapSkipTargetException)):
+            errMsg = getSafeExString(ex) if isinstance(ex, SqlmapBaseException) else "%s: %s" % (type(ex).__name__, getSafeExString(ex))
+            logger.error("thread %s: '%s'" % (threading.currentThread().getName(), errMsg))
+
+            if conf.get("verbose") > 1 and not isinstance(ex, SqlmapConnectionException):
                 traceback.print_exc()
 
 def setDaemon(thread):
@@ -108,20 +119,23 @@ def setDaemon(thread):
 def runThreads(numThreads, threadFunction, cleanupFunction=None, forwardException=True, threadChoice=False, startThreadMsg=True):
     threads = []
 
-    kb.multiThreadMode = True
+    kb.multipleCtrlC = False
     kb.threadContinue = True
     kb.threadException = False
+    kb.technique = ThreadData.technique
 
-    if threadChoice and numThreads == 1 and not (kb.injection.data and not any(_ not in (PAYLOAD.TECHNIQUE.TIME, PAYLOAD.TECHNIQUE.STACKED) for _ in kb.injection.data)):
+    if threadChoice and conf.threads == numThreads == 1 and not (kb.injection.data and not any(_ not in (PAYLOAD.TECHNIQUE.TIME, PAYLOAD.TECHNIQUE.STACKED) for _ in kb.injection.data)):
         while True:
             message = "please enter number of threads? [Enter for %d (current)] " % numThreads
             choice = readInput(message, default=str(numThreads))
             if choice:
                 skipThreadCheck = False
+
                 if choice.endswith('!'):
                     choice = choice[:-1]
                     skipThreadCheck = True
-                if choice.isdigit():
+
+                if isDigit(choice):
                     if int(choice) > MAX_NUMBER_OF_THREADS and not skipThreadCheck:
                         errMsg = "maximum number of used threads is %d avoiding potential connection issues" % MAX_NUMBER_OF_THREADS
                         logger.critical(errMsg)
@@ -150,8 +164,8 @@ def runThreads(numThreads, threadFunction, cleanupFunction=None, forwardExceptio
 
             try:
                 thread.start()
-            except Exception, ex:
-                errMsg = "error occurred while starting new thread ('%s')" % ex.message
+            except Exception as ex:
+                errMsg = "error occurred while starting new thread ('%s')" % ex
                 logger.critical(errMsg)
                 break
 
@@ -162,14 +176,21 @@ def runThreads(numThreads, threadFunction, cleanupFunction=None, forwardExceptio
         while alive:
             alive = False
             for thread in threads:
-                if thread.isAlive():
+                if thread.is_alive():
                     alive = True
                     time.sleep(0.1)
 
-    except (KeyboardInterrupt, SqlmapUserQuitException), ex:
-        print
+    except (KeyboardInterrupt, SqlmapUserQuitException) as ex:
+        print()
+        kb.prependFlag = False
         kb.threadContinue = False
         kb.threadException = True
+
+        if kb.lastCtrlCTime and (time.time() - kb.lastCtrlCTime < 1):
+            kb.multipleCtrlC = True
+            raise SqlmapUserQuitException("user aborted (Ctrl+C was pressed multiple times)")
+
+        kb.lastCtrlCTime = time.time()
 
         if numThreads > 1:
             logger.info("waiting for threads to finish%s" % (" (Ctrl+C was pressed)" if isinstance(ex, KeyboardInterrupt) else ""))
@@ -178,33 +199,35 @@ def runThreads(numThreads, threadFunction, cleanupFunction=None, forwardExceptio
                 pass
 
         except KeyboardInterrupt:
+            kb.multipleCtrlC = True
             raise SqlmapThreadException("user aborted (Ctrl+C was pressed multiple times)")
 
         if forwardException:
             raise
 
-    except (SqlmapConnectionException, SqlmapValueException), ex:
-        print
+    except (SqlmapConnectionException, SqlmapValueException) as ex:
+        print()
         kb.threadException = True
-        logger.error("thread %s: %s" % (threading.currentThread().getName(), ex.message))
+        logger.error("thread %s: '%s'" % (threading.currentThread().getName(), ex))
 
-        if conf.verbose > 1:
+        if conf.get("verbose") > 1 and isinstance(ex, SqlmapValueException):
             traceback.print_exc()
 
     except:
-        from lib.core.common import unhandledExceptionMessage
+        print()
 
-        print
-        kb.threadException = True
-        errMsg = unhandledExceptionMessage()
-        logger.error("thread %s: %s" % (threading.currentThread().getName(), errMsg))
-        traceback.print_exc()
+        if not kb.multipleCtrlC:
+            from lib.core.common import unhandledExceptionMessage
+
+            kb.threadException = True
+            errMsg = unhandledExceptionMessage()
+            logger.error("thread %s: %s" % (threading.currentThread().getName(), errMsg))
+            traceback.print_exc()
 
     finally:
-        kb.multiThreadMode = False
-        kb.bruteMode = False
         kb.threadContinue = True
         kb.threadException = False
+        kb.technique = None
 
         for lock in kb.locks.values():
             if lock.locked():

@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
 
 import re
 
 from xml.sax.handler import ContentHandler
+
 from lib.core.common import sanitizeStr
 
 class FingerprintHandler(ContentHandler):
@@ -35,7 +36,7 @@ class FingerprintHandler(ContentHandler):
         if key == "dbmsVersion":
             self._info[key] = value
         else:
-            if key not in self._info.keys():
+            if key not in self._info:
                 self._info[key] = set()
 
             for _ in value.split("|"):

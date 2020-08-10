@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
 
@@ -28,7 +28,7 @@ from lib.core.exception import SqlmapNoneDataException
 from lib.core.exception import SqlmapUnsupportedFeatureException
 from lib.request import inject
 
-class Miscellaneous:
+class Miscellaneous(object):
     """
     This class defines miscellaneous functionalities for plugins.
     """
@@ -137,7 +137,10 @@ class Miscellaneous:
             self.delRemoteFile(self.webStagerFilePath)
             self.delRemoteFile(self.webBackdoorFilePath)
 
-        if not isStackingAvailable() and not conf.direct:
+        if (not isStackingAvailable() or kb.udfFail) and not conf.direct:
+            return
+
+        if any((conf.osCmd, conf.osShell)) and Backend.isDbms(DBMS.PGSQL) and kb.copyExecTest:
             return
 
         if Backend.isOs(OS.WINDOWS):
@@ -162,7 +165,7 @@ class Miscellaneous:
             inject.goStacked("DROP TABLE %s" % self.cmdTblName, silent=True)
 
             if Backend.isDbms(DBMS.MSSQL):
-                udfDict = {"master..new_xp_cmdshell": None}
+                udfDict = {"master..new_xp_cmdshell": {}}
 
             if udfDict is None:
                 udfDict = self.sysUdfs

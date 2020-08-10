@@ -570,7 +570,7 @@ class Route(object):
 
     def prepare(self):
         """ Do all on-demand work immediately (useful for debugging)."""
-        self.call
+        self.call()
 
     def all_plugins(self):
         """ Yield all Plugins affecting this route. """
@@ -1518,7 +1518,7 @@ class BaseRequest(object):
             raise AttributeError("Attribute already defined: %s" % name)
         self.environ[key] = value
 
-    def __delattr__(self, name, value):
+    def __delattr__(self, name):
         try:
             del self.environ['bottle.request.ext.%s' % name]
         except KeyError:
@@ -2630,7 +2630,7 @@ def debug(mode=True):
     """ Change the debug level.
     There is only one debug level supported at the moment."""
     global DEBUG
-    if mode: warnings.simplefilter('default')
+    #if mode: warnings.simplefilter('default')  # neutralizing already set warning filters (e.g. DeprecationWarning inside sqlmapapi.py)
     DEBUG = bool(mode)
 
 

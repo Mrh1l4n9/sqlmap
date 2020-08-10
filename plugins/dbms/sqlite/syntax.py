@@ -1,37 +1,35 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
 
 import binascii
 
 from lib.core.common import isDBMSVersionAtLeast
-from lib.core.settings import UNICODE_ENCODING
+from lib.core.convert import getBytes
+from lib.core.convert import getUnicode
 from plugins.generic.syntax import Syntax as GenericSyntax
 
 class Syntax(GenericSyntax):
-    def __init__(self):
-        GenericSyntax.__init__(self)
-
     @staticmethod
     def escape(expression, quote=True):
         """
         >>> from lib.core.common import Backend
         >>> Backend.setVersion('2')
         ['2']
-        >>> Syntax.escape("SELECT 'abcdefgh' FROM foobar")
-        "SELECT 'abcdefgh' FROM foobar"
+        >>> Syntax.escape("SELECT 'abcdefgh' FROM foobar") == "SELECT 'abcdefgh' FROM foobar"
+        True
         >>> Backend.setVersion('3')
         ['3']
-        >>> Syntax.escape("SELECT 'abcdefgh' FROM foobar")
-        "SELECT CAST(X'6162636465666768' AS TEXT) FROM foobar"
+        >>> Syntax.escape("SELECT 'abcdefgh' FROM foobar") == "SELECT CAST(X'6162636465666768' AS TEXT) FROM foobar"
+        True
         """
 
         def escaper(value):
             # Reference: http://stackoverflow.com/questions/3444335/how-do-i-quote-a-utf-8-string-literal-in-sqlite3
-            return "CAST(X'%s' AS TEXT)" % binascii.hexlify(value.encode(UNICODE_ENCODING) if isinstance(value, unicode) else value)
+            return "CAST(X'%s' AS TEXT)" % getUnicode(binascii.hexlify(getBytes(value)))
 
         retVal = expression
 

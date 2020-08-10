@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 #
 # Copyright 2008-2009 Jose Fonseca
 #
@@ -29,8 +29,11 @@ import os.path
 import re
 import textwrap
 import optparse
+import sys
 import xml.parsers.expat
 
+if sys.version_info >= (3, 0):
+    xrange = range
 
 try:
     # Debugging helper module
@@ -695,7 +698,7 @@ class XmlTokenizer:
             self.final = len(data) < size
             try:
                 self.parser.Parse(data, self.final)
-            except xml.parsers.expat.ExpatError, e:
+            except xml.parsers.expat.ExpatError as e:
                 #if e.code == xml.parsers.expat.errors.XML_ERROR_NO_ELEMENTS:
                 if e.code == 3:
                     pass
@@ -732,7 +735,7 @@ class XmlParser(Parser):
         self.consume()
 
     def consume(self):
-        self.token = self.tokenizer.next()
+        self.token = next(self.tokenizer)
 
     def match_element_start(self, name):
         return self.token.type == XML_ELEMENT_START and self.token.name_or_data == name
@@ -1036,10 +1039,10 @@ class CallgrindParser(LineParser):
     """Parser for valgrind's callgrind tool.
 
     See also:
-    - http://valgrind.org/docs/manual/cl-Format.html
+    - https://web.archive.org/web/20190415231603/http://valgrind.org/docs/manual/cl-Format.html
     """
 
-    _call_re = re.compile('^calls=\s*(\d+)\s+((\d+|\+\d+|-\d+|\*)\s+)+$')
+    _call_re = re.compile(r'^calls=\s*(\d+)\s+((\d+|\+\d+|-\d+|\*)\s+)+$')
 
     def __init__(self, infile):
         LineParser.__init__(self, infile)
@@ -1201,7 +1204,7 @@ class CallgrindParser(LineParser):
 
         return True
 
-    _position_re = re.compile('^(?P<position>c?(?:ob|fl|fi|fe|fn))=\s*(?:\((?P<id>\d+)\))?(?:\s*(?P<name>.+))?')
+    _position_re = re.compile(r'^(?P<position>c?(?:ob|fl|fi|fe|fn))=\s*(?:\((?P<id>\d+)\))?(?:\s*(?P<name>.+))?')
 
     _position_table_map = {
         'ob': 'ob',
@@ -1268,16 +1271,6 @@ class CallgrindParser(LineParser):
             return None
         key, value = pair
         return value
-        line = self.lookahead()
-        mo = self._key_re.match(line)
-        if not mo:
-            return None
-        key, value = line.split(':', 1)
-        if key not in keys:
-            return None
-        value = value.strip()
-        self.consume()
-        return key, value
 
     def parse_keys(self, keys):
         line = self.lookahead()
@@ -1719,7 +1712,7 @@ class XPerfParser(Parser):
             lineterminator = '\r\n',
             quoting = csv.QUOTE_NONE)
         it = iter(reader)
-        row = reader.next()
+        row = next(reader)
         self.parse_header(row)
         for row in it:
             self.parse_row(row)
@@ -2068,7 +2061,8 @@ class PstatsParser:
         self.profile = Profile()
         self.function_ids = {}
 
-    def get_function_name(self, (filename, line, name)):
+    def get_function_name(self, args):
+        filename, line, name = args
         module = os.path.splitext(filename)[0]
         module = os.path.basename(module)
         return "%s:%d:%s" % (module, line, name)
@@ -2403,7 +2397,8 @@ class DotWriter:
             raise TypeError
         self.write(s)
 
-    def color(self, (r, g, b)):
+    def color(self, args):
+        r, g, b = args
 
         def float2int(f):
             if f <= 0.0:

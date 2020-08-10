@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
 
@@ -67,10 +67,10 @@ class Takeover(GenericTakeover):
         # On MySQL 4.1 < 4.1.25 and on MySQL 4.1 >= 4.1.25 with NO plugin_dir set in my.ini configuration file
         # On MySQL 5.0 < 5.0.67 and on MySQL 5.0 >= 5.0.67 with NO plugin_dir set in my.ini configuration file
         else:
-            #logger.debug("retrieving MySQL data directory absolute path")
+            # logger.debug("retrieving MySQL data directory absolute path")
 
             # Reference: http://dev.mysql.com/doc/refman/5.1/en/server-options.html#option_mysqld_datadir
-            #self.__datadir = inject.getValue("SELECT @@datadir")
+            # self.__datadir = inject.getValue("SELECT @@datadir")
 
             # NOTE: specifying the relative path as './udf.dll'
             # saves in @@datadir on both MySQL 4.1 and MySQL 5.0

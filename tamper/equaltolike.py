@@ -1,25 +1,22 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2020 sqlmap developers (http://sqlmap.org/)
 See the file 'LICENSE' for copying permission
 """
 
-import os
 import re
 
-from lib.core.common import singleTimeWarnMessage
-from lib.core.enums import DBMS
 from lib.core.enums import PRIORITY
 
 __priority__ = PRIORITY.HIGHEST
 
 def dependencies():
-    singleTimeWarnMessage("tamper script '%s' is unlikely to work against %s" % (os.path.basename(__file__).split(".")[0], DBMS.PGSQL))
+    pass
 
 def tamper(payload, **kwargs):
     """
-    Replaces all occurrences of operator equal ('=') with operator 'LIKE'
+    Replaces all occurrences of operator equal ('=') with 'LIKE' counterpart
 
     Tested against:
         * Microsoft SQL Server 2005
