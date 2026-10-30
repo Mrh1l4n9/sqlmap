@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -13,6 +13,7 @@ try:
 except:
     pass
 
+from lib.core.common import getSafeExString
 from lib.core.data import logger
 from lib.core.exception import SqlmapConnectionException
 from plugins.generic.connector import Connector as GenericConnector
@@ -28,16 +29,13 @@ class Connector(GenericConnector):
     Possible connectors: http://wiki.python.org/moin/PostgreSQL
     """
 
-    def __init__(self):
-        GenericConnector.__init__(self)
-
     def connect(self):
         self.initConnection()
 
         try:
             self.connector = psycopg2.connect(host=self.hostname, user=self.user, password=self.password, database=self.db, port=self.port)
-        except psycopg2.OperationalError, msg:
-            raise SqlmapConnectionException(msg)
+        except (psycopg2.OperationalError, UnicodeDecodeError) as ex:
+            raise SqlmapConnectionException(getSafeExString(ex))
 
         self.connector.set_client_encoding('UNICODE')
 
@@ -47,8 +45,8 @@ class Connector(GenericConnector):
     def fetchall(self):
         try:
             return self.cursor.fetchall()
-        except psycopg2.ProgrammingError, msg:
-            logger.warn(msg)
+        except psycopg2.ProgrammingError as ex:
+            logger.warning(getSafeExString(ex))
             return None
 
     def execute(self, query):
@@ -57,10 +55,13 @@ class Connector(GenericConnector):
         try:
             self.cursor.execute(query)
             retVal = True
-        except (psycopg2.OperationalError, psycopg2.ProgrammingError), msg:
-            logger.warn(("(remote) %s" % msg).strip())
-        except psycopg2.InternalError, msg:
-            raise SqlmapConnectionException(msg)
+        # Note: also catch DataError/IntegrityError (e.g. division-by-zero, bad cast, unique violation from a
+        # user '--sql-query') so the commit() below still runs and clears the aborted transaction; otherwise
+        # PostgreSQL poisons every later query with 'InFailedSqlTransaction' and silently returns None
+        except (psycopg2.OperationalError, psycopg2.ProgrammingError, psycopg2.DataError, psycopg2.IntegrityError) as ex:
+            logger.warning(("(remote) '%s'" % getSafeExString(ex)).strip())
+        except psycopg2.InternalError as ex:
+            raise SqlmapConnectionException(getSafeExString(ex))
 
         self.connector.commit()
 

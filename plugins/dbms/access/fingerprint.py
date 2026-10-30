@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -48,11 +48,12 @@ class Fingerprint(GenericFingerprint):
 
         # Microsoft Access table reference updated on 01/2010
         sysTables = {
-                      "97":           ("MSysModules2", "MSysAccessObjects"),
-                      "2000" :        ("!MSysModules2", "MSysAccessObjects"),
-                      "2002-2003" :   ("MSysAccessStorage", "!MSysNavPaneObjectIDs"),
-                      "2007" :        ("MSysAccessStorage", "MSysNavPaneObjectIDs"),
-                    }
+            "97": ("MSysModules2", "MSysAccessObjects"),
+            "2000": ("!MSysModules2", "MSysAccessObjects"),
+            "2002-2003": ("MSysAccessStorage", "!MSysNavPaneObjectIDs"),
+            "2007": ("MSysAccessStorage", "MSysNavPaneObjectIDs"),
+        }
+
         # MSysAccessXML is not a reliable system table because it doesn't always exist
         # ("Access through Access", p6, should be "normally doesn't exist" instead of "is normally empty")
 
@@ -128,13 +129,14 @@ class Fingerprint(GenericFingerprint):
         value += "active fingerprint: %s" % actVer
 
         if kb.bannerFp:
-            banVer = kb.bannerFp["dbmsVersion"]
+            banVer = kb.bannerFp.get("dbmsVersion")
 
-            if re.search(r"-log$", kb.data.banner):
-                banVer += ", logging enabled"
+            if banVer:
+                if re.search(r"-log$", kb.data.banner or ""):
+                    banVer += ", logging enabled"
 
-            banVer = Format.getDbms([banVer])
-            value += "\n%sbanner parsing fingerprint: %s" % (blank, banVer)
+                banVer = Format.getDbms([banVer])
+                value += "\n%sbanner parsing fingerprint: %s" % (blank, banVer)
 
         htmlErrorFp = Format.getErrorParsedDBMSes()
 
@@ -160,11 +162,11 @@ class Fingerprint(GenericFingerprint):
             infoMsg = "confirming %s" % DBMS.ACCESS
             logger.info(infoMsg)
 
-            result = inject.checkBooleanExpression("IIF(ATN(2)>0,1,0) BETWEEN 2 AND 0")
+            result = inject.checkBooleanExpression("IIF(ATN(2) IS NOT NULL,1,0) BETWEEN 2 AND 0")
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.ACCESS
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
                 return False
 
             setDbms(DBMS.ACCESS)
@@ -183,7 +185,7 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.ACCESS
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
 

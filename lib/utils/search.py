@@ -1,182 +1,152 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
-import httplib
 import re
 import socket
-import urllib
-import urllib2
 
 from lib.core.common import getSafeExString
-from lib.core.common import getUnicode
 from lib.core.common import popValue
 from lib.core.common import pushValue
-from lib.core.common import readInput
 from lib.core.common import urlencode
+from lib.core.convert import decodeBase64
+from lib.core.convert import getBytes
+from lib.core.convert import getUnicode
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
+from lib.core.decorators import stackedmethod
 from lib.core.enums import CUSTOM_LOGGING
 from lib.core.enums import HTTP_HEADER
 from lib.core.enums import REDIRECTION
 from lib.core.exception import SqlmapBaseException
-from lib.core.exception import SqlmapConnectionException
-from lib.core.exception import SqlmapUserQuitException
 from lib.core.settings import BING_REGEX
-from lib.core.settings import DUMMY_SEARCH_USER_AGENT
 from lib.core.settings import DUCKDUCKGO_REGEX
-from lib.core.settings import GOOGLE_REGEX
+from lib.core.settings import DUMMY_SEARCH_USER_AGENT
 from lib.core.settings import HTTP_ACCEPT_ENCODING_HEADER_VALUE
+from lib.core.settings import SEARCH_ABUSE_MARKERS
 from lib.core.settings import UNICODE_ENCODING
 from lib.request.basic import decodePage
+from thirdparty.six.moves import http_client as _http_client
+from thirdparty.six.moves import urllib as _urllib
 from thirdparty.socks import socks
 
+def _fetch(url, headers, data=None):
+    """
+    Fetches and returns the (decoded) content of a search engine results page
+    (or None in case of a connection issue)
+    """
+
+    retVal = None
+
+    try:
+        req = _urllib.request.Request(url, data=getBytes(data) if data else None, headers=headers)
+        conn = _urllib.request.urlopen(req)
+
+        requestMsg = "HTTP request:\n%s %s" % ("POST" if data else "GET", url)
+        requestMsg += " %s" % _http_client.HTTPConnection._http_vsn_str
+        logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
+
+        page = conn.read()
+        responseHeaders = conn.info()
+
+        responseMsg = "HTTP response (%s - %d):\n" % (conn.msg, conn.code)
+        if conf.verbose <= 4:
+            responseMsg += getUnicode(responseHeaders, UNICODE_ENCODING)
+        elif conf.verbose > 4:
+            responseMsg += "%s\n%s\n" % (responseHeaders, page)
+        logger.log(CUSTOM_LOGGING.TRAFFIC_IN, responseMsg)
+
+        page = decodePage(page, responseHeaders.get(HTTP_HEADER.CONTENT_ENCODING), responseHeaders.get(HTTP_HEADER.CONTENT_TYPE))
+        retVal = getUnicode(page)  # Note: if decodePage call fails (Issue #4202)
+    except _urllib.error.HTTPError as ex:
+        try:
+            retVal = getUnicode(ex.read())
+        except Exception:
+            pass
+    except (_urllib.error.URLError, _http_client.error, socket.error, socket.timeout, socks.ProxyError):
+        pass
+
+    return retVal
 
 def _search(dork):
     """
-    This method performs the effective search on Google providing
-    the google dork and the Google session cookie
+    This method performs the effective search using the provided dork,
+    trying the available search engines in order of (current) scraping
+    reliability and returning the results of the first one that yields any
+    (so that the failure of a single engine does not break the feature)
     """
 
     if not dork:
         return None
 
-    headers = {}
+    retVal = []
+    seen = set()
 
-    headers[HTTP_HEADER.USER_AGENT] = dict(conf.httpHeaders).get(HTTP_HEADER.USER_AGENT, DUMMY_SEARCH_USER_AGENT)
-    headers[HTTP_HEADER.ACCEPT_ENCODING] = HTTP_ACCEPT_ENCODING_HEADER_VALUE
-
-    try:
-        req = urllib2.Request("https://www.google.com/ncr", headers=headers)
-        conn = urllib2.urlopen(req)
-    except Exception, ex:
-        errMsg = "unable to connect to Google ('%s')" % getSafeExString(ex)
-        raise SqlmapConnectionException(errMsg)
+    requestHeaders = {
+        HTTP_HEADER.USER_AGENT: dict(conf.httpHeaders).get(HTTP_HEADER.USER_AGENT, DUMMY_SEARCH_USER_AGENT),
+        HTTP_HEADER.ACCEPT_ENCODING: HTTP_ACCEPT_ENCODING_HEADER_VALUE,
+    }
 
     gpage = conf.googlePage if conf.googlePage > 1 else 1
     logger.info("using search result page #%d" % gpage)
 
-    url = "https://www.google.com/search?"
-    url += "q=%s&" % urlencode(dork, convall=True)
-    url += "num=100&hl=en&complete=0&safe=off&filter=0&btnG=Search"
-    url += "&start=%d" % ((gpage - 1) * 100)
+    encoded = urlencode(dork, convall=True)
 
-    try:
-        req = urllib2.Request(url, headers=headers)
-        conn = urllib2.urlopen(req)
+    # Note: DuckDuckGo's first result page holds 10 entries, while each subsequent one holds 15 (hence the non-linear offset)
+    ddgOffset = 0 if gpage == 1 else 10 + (gpage - 2) * 15
 
-        requestMsg = "HTTP request:\nGET %s" % url
-        requestMsg += " %s" % httplib.HTTPConnection._http_vsn_str
-        logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
+    # Note: (name, url, POST data, regex, regex flags, match->link). Ordered by current scraping reliability; tried in turn until one yields results (Google is not in here as it serves results only to JavaScript capable clients)
+    engines = (
+        ("DuckDuckGo", "https://html.duckduckgo.com/html/", "q=%s&s=%d" % (encoded, ddgOffset), DUCKDUCKGO_REGEX, re.I | re.S, lambda match: match.group(1).replace("&amp;", "&")),
+        ("Bing", "https://www.bing.com/search?q=%s&first=%d" % (encoded, (gpage - 1) * 10 + 1), None, BING_REGEX, re.I | re.S, lambda match: decodeBase64(match.group(1), binary=False) if match.group(1) else match.group(2).replace("&amp;", "&")),
+    )
 
-        page = conn.read()
-        code = conn.code
-        status = conn.msg
-        responseHeaders = conn.info()
-        page = decodePage(page, responseHeaders.get("Content-Encoding"), responseHeaders.get("Content-Type"))
+    for name, url, data, regex, flags, extract in engines:
+        page = _fetch(url, requestHeaders, data)
 
-        responseMsg = "HTTP response (%s - %d):\n" % (status, code)
+        if not page:
+            continue
 
-        if conf.verbose <= 4:
-            responseMsg += getUnicode(responseHeaders, UNICODE_ENCODING)
-        elif conf.verbose > 4:
-            responseMsg += "%s\n%s\n" % (responseHeaders, page)
+        count = 0
+        for match in re.finditer(regex, page, flags):
+            link = _urllib.parse.unquote(extract(match))
+            if link and link not in seen:
+                seen.add(link)
+                retVal.append(link)
+                count += 1
 
-        logger.log(CUSTOM_LOGGING.TRAFFIC_IN, responseMsg)
-    except urllib2.HTTPError, e:
-        try:
-            page = e.read()
-        except Exception, ex:
-            warnMsg = "problem occurred while trying to get "
-            warnMsg += "an error page information (%s)" % getSafeExString(ex)
-            logger.critical(warnMsg)
-            return None
-    except (urllib2.URLError, httplib.error, socket.error, socket.timeout, socks.ProxyError):
-        errMsg = "unable to connect to Google"
-        raise SqlmapConnectionException(errMsg)
+        if count:
+            logger.info("found %d usable link%s using %s" % (count, 's' if count != 1 else "", name))
+            break  # Note: stop at the first engine that actually returns results (others are only fallbacks)
 
-    retVal = [urllib.unquote(match.group(1) or match.group(2)) for match in re.finditer(GOOGLE_REGEX, page, re.I)]
-
-    if not retVal and "detected unusual traffic" in page:
-        warnMsg = "Google has detected 'unusual' traffic from "
-        warnMsg += "used IP address disabling further searches"
-
-        if conf.proxyList:
+        # Note: switch proxy (if available) when an abuse/captcha page was served (instead of pointlessly falling through to the next engine from the same blocked IP)
+        if conf.proxyList and any(marker in page for marker in SEARCH_ABUSE_MARKERS):
+            warnMsg = "%s has detected 'unusual' traffic from the used IP address" % name
             raise SqlmapBaseException(warnMsg)
-        else:
-            logger.critical(warnMsg)
 
     if not retVal:
-        message = "no usable links found. What do you want to do?"
-        message += "\n[1] (re)try with DuckDuckGo (default)"
-        message += "\n[2] (re)try with Bing"
-        message += "\n[3] quit"
-        choice = readInput(message, default='1')
-
-        if choice == '3':
-            raise SqlmapUserQuitException
-        elif choice == '2':
-            url = "https://www.bing.com/search?q=%s&first=%d" % (urlencode(dork, convall=True), (gpage - 1) * 10 + 1)
-            regex = BING_REGEX
-        else:
-            url = "https://duckduckgo.com/d.js?"
-            url += "q=%s&p=%d&s=100" % (urlencode(dork, convall=True), gpage)
-            regex = DUCKDUCKGO_REGEX
-
-        try:
-            req = urllib2.Request(url, headers=headers)
-            conn = urllib2.urlopen(req)
-
-            requestMsg = "HTTP request:\nGET %s" % url
-            requestMsg += " %s" % httplib.HTTPConnection._http_vsn_str
-            logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
-
-            page = conn.read()
-            code = conn.code
-            status = conn.msg
-            responseHeaders = conn.info()
-            page = decodePage(page, responseHeaders.get("Content-Encoding"), responseHeaders.get("Content-Type"))
-
-            responseMsg = "HTTP response (%s - %d):\n" % (status, code)
-
-            if conf.verbose <= 4:
-                responseMsg += getUnicode(responseHeaders, UNICODE_ENCODING)
-            elif conf.verbose > 4:
-                responseMsg += "%s\n%s\n" % (responseHeaders, page)
-
-            logger.log(CUSTOM_LOGGING.TRAFFIC_IN, responseMsg)
-        except urllib2.HTTPError, e:
-            try:
-                page = e.read()
-            except socket.timeout:
-                warnMsg = "connection timed out while trying "
-                warnMsg += "to get error page information (%d)" % e.code
-                logger.critical(warnMsg)
-                return None
-        except:
-            errMsg = "unable to connect"
-            raise SqlmapConnectionException(errMsg)
-
-        retVal = [urllib.unquote(match.group(1)) for match in re.finditer(regex, page, re.I | re.S)]
+        warnMsg = "no usable links found (search engines might be blocking the used IP address)"
+        logger.critical(warnMsg)
 
     return retVal
 
+@stackedmethod
 def search(dork):
-    pushValue(kb.redirectChoice)
-    kb.redirectChoice = REDIRECTION.YES
+    pushValue(kb.choices.redirect)
+    kb.choices.redirect = REDIRECTION.YES
 
     try:
         return _search(dork)
-    except SqlmapBaseException, ex:
+    except SqlmapBaseException as ex:
         if conf.proxyList:
             logger.critical(getSafeExString(ex))
 
             warnMsg = "changing proxy"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             conf.proxy = None
 
@@ -184,8 +154,9 @@ def search(dork):
             return search(dork)
         else:
             raise
-    finally:
-        kb.redirectChoice = popValue()
 
-def setHTTPHandlers():  # Cross-linked function
+    finally:
+        kb.choices.redirect = popValue()
+
+def setHTTPHandlers():  # Cross-referenced function
     raise NotImplementedError

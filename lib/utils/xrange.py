@@ -1,15 +1,33 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
+
+import numbers
 
 class xrange(object):
     """
     Advanced (re)implementation of xrange (supports slice/copy/etc.)
     Reference: http://code.activestate.com/recipes/521885-a-pythonic-implementation-of-xrange/
 
+    >>> list(xrange(1, 9)) == list(range(1, 9))
+    True
+    >>> list(xrange(8, 0, -16)) == list(range(8, 0, -16))
+    True
+    >>> list(xrange(0, 8, 16)) == list(range(0, 8, 16))
+    True
+    >>> list(xrange(0, 4, 5)) == list(range(0, 4, 5))
+    True
+    >>> list(xrange(4, 0, 3)) == list(range(4, 0, 3))
+    True
+    >>> list(xrange(0, -3)) == list(range(0, -3))
+    True
+    >>> list(xrange(0, 7, 2)) == list(range(0, 7, 2))
+    True
+    >>> list(xrange(8, 0, -2)) == list(range(8, 0, -2))
+    True
     >>> foobar = xrange(1, 10)
     >>> 7 in foobar
     True
@@ -17,6 +35,12 @@ class xrange(object):
     False
     >>> foobar[0]
     1
+    >>> 6 in xrange(8, 0, -2)
+    True
+    >>> 0 in xrange(8, 0, -2)
+    False
+    >>> xrange(0, 10, 2).index(4)
+    2
     """
 
     __slots__ = ['_slice']
@@ -48,29 +72,31 @@ class xrange(object):
     def __hash__(self):
         return hash(self._slice)
 
-    def __cmp__(self, other):
-        return (cmp(type(self), type(other)) or
-                cmp(self._slice, other._slice))
-
     def __repr__(self):
-        return '%s(%r, %r, %r)' % (type(self).__name__,
-                                   self.start, self.stop, self.step)
+        return '%s(%r, %r, %r)' % (type(self).__name__, self.start, self.stop, self.step)
 
     def __len__(self):
         return self._len()
 
     def _len(self):
-        return max(0, int((self.stop - self.start) / self.step))
+        if self.step > 0:
+            lo, hi, step = self.start, self.stop, self.step
+        else:  # Note: normalizing for descending ranges (negative step)
+            lo, hi, step = self.stop, self.start, -self.step
+        return max(0, (hi - lo + step - 1) // step)
 
     def __contains__(self, value):
-        return (self.start <= value < self.stop) and (value - self.start) % self.step == 0
+        if self.step > 0:
+            return self.start <= value < self.stop and (value - self.start) % self.step == 0
+        else:
+            return self.stop < value <= self.start and (value - self.start) % self.step == 0
 
     def __getitem__(self, index):
         if isinstance(index, slice):
             start, stop, step = index.indices(self._len())
             return xrange(self._index(start),
-                          self._index(stop), step*self.step)
-        elif isinstance(index, (int, long)):
+                          self._index(stop), step * self.step)
+        elif isinstance(index, numbers.Integral):
             if index < 0:
                 fixed_index = index + self._len()
             else:
@@ -87,7 +113,7 @@ class xrange(object):
         return self.start + self.step * i
 
     def index(self, i):
-        if self.start <= i < self.stop:
-            return i - self.start
+        if i in self:
+            return (i - self.start) // self.step  # Note: also accounts for step != 1 (and descending ranges)
         else:
             raise ValueError("%d is not in list" % i)

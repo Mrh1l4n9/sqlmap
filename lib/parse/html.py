@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -9,9 +9,12 @@ import re
 
 from xml.sax.handler import ContentHandler
 
+from lib.core.common import singleTimeWarnMessage
+from lib.core.common import urldecode
 from lib.core.common import parseXmlFile
 from lib.core.data import kb
 from lib.core.data import paths
+from lib.core.settings import HEURISTIC_PAGE_SIZE_THRESHOLD
 from lib.core.threads import getCurrentThreadData
 
 class HTMLHandler(ContentHandler):
@@ -25,7 +28,11 @@ class HTMLHandler(ContentHandler):
 
         self._dbms = None
         self._page = (page or "")
-        self._lower_page = self._page.lower()
+        self._urldecodedPage = urldecode(self._page)
+        try:
+            self._lowerPage = self._urldecodedPage.lower()  # Note: keyword pre-filter must match the page that re.search() runs on (the URL-decoded one)
+        except SystemError:  # https://bugs.python.org/issue18183
+            self._lowerPage = None
 
         self.dbms = None
 
@@ -47,19 +54,32 @@ class HTMLHandler(ContentHandler):
                 keywords = sorted(keywords, key=len)
                 kb.cache.regex[regexp] = keywords[-1].lower()
 
-            if kb.cache.regex[regexp] in self._lower_page and re.search(regexp, self._page, re.I):
+            if ('|' in regexp or kb.cache.regex[regexp] in (self._lowerPage or kb.cache.regex[regexp])) and re.search(regexp, self._urldecodedPage, re.I):
                 self.dbms = self._dbms
                 self._markAsErrorPage()
+                kb.forkNote = kb.forkNote or attrs.get("fork")
 
 def htmlParser(page):
     """
     This function calls a class that parses the input HTML page to
     fingerprint the back-end database management system
+
+    >>> from lib.core.enums import DBMS
+    >>> htmlParser("Warning: mysql_fetch_array() expects parameter 1 to be resource") == DBMS.MYSQL
+    True
+    >>> threadData = getCurrentThreadData()
+    >>> threadData.lastErrorPage = None
     """
+
+    page = page[:HEURISTIC_PAGE_SIZE_THRESHOLD]
 
     xmlfile = paths.ERRORS_XML
     handler = HTMLHandler(page)
     key = hash(page)
+
+    # generic SQL warning/error messages
+    if re.search(r"SQL (warning|error|syntax)", page, re.I):
+        handler._markAsErrorPage()
 
     if key in kb.cache.parsedDbms:
         retVal = kb.cache.parsedDbms[key]
@@ -67,7 +87,12 @@ def htmlParser(page):
             handler._markAsErrorPage()
         return retVal
 
-    parseXmlFile(xmlfile, handler)
+    try:
+        parseXmlFile(xmlfile, handler)
+    except Exception:
+        # DBMS fingerprinting from the error page is best-effort - a broken or third-party-patched
+        # xml.sax (e.g. a modified stdlib on some distros) must not abort the whole scan (see #6086)
+        singleTimeWarnMessage("unable to parse the response page for DBMS-specific error messages")
 
     if handler.dbms and handler.dbms not in kb.htmlFp:
         kb.lastParserStatus = handler.dbms
@@ -76,9 +101,5 @@ def htmlParser(page):
         kb.lastParserStatus = None
 
     kb.cache.parsedDbms[key] = handler.dbms
-
-    # generic SQL warning/error messages
-    if re.search(r"SQL (warning|error|syntax)", page, re.I):
-        handler._markAsErrorPage()
 
     return handler.dbms

@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 from lib.core.common import Backend
 from lib.core.common import Format
 from lib.core.common import unArrayizeValue
+from lib.core.compat import xrange
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
@@ -46,9 +47,11 @@ class Fingerprint(GenericFingerprint):
         value += "active fingerprint: %s" % actVer
 
         if kb.bannerFp:
-            banVer = kb.bannerFp["dbmsVersion"]
-            banVer = Format.getDbms([banVer])
-            value += "\n%sbanner parsing fingerprint: %s" % (blank, banVer)
+            banVer = kb.bannerFp.get("dbmsVersion")
+
+            if banVer:
+                banVer = Format.getDbms([banVer])
+                value += "\n%sbanner parsing fingerprint: %s" % (blank, banVer)
 
         htmlErrorFp = Format.getErrorParsedDBMSes()
 
@@ -83,7 +86,7 @@ class Fingerprint(GenericFingerprint):
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.SYBASE
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
 
@@ -103,7 +106,8 @@ class Fingerprint(GenericFingerprint):
                 Backend.setVersion(str(result))
             else:
                 for version in xrange(12, 16):
-                    result = inject.checkBooleanExpression("PATINDEX('%%/%d[./]%%',@@VERSION)>0" % version)
+                    # Note: plain LIKE matches the same two shapes, without the bracket class that WAF/IPS score (e.g. OWASP CRS rule 932130)
+                    result = inject.checkBooleanExpression("(@@VERSION LIKE '%%/%d.%%' OR @@VERSION LIKE '%%/%d/%%')" % (version, version))
 
                     if result:
                         Backend.setVersion(str(version))
@@ -112,6 +116,6 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.SYBASE
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False

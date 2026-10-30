@@ -1,23 +1,30 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import codecs
 import gzip
+import io
 import logging
 import re
-import StringIO
-import struct
 import zlib
+
+from lib.utils import brotli as _brotli
+
+try:
+    from compression import zstd as _zstd     # Python 3.14+ stdlib (PEP 784); no third-party dependency
+except ImportError:
+    _zstd = None
 
 from lib.core.common import Backend
 from lib.core.common import extractErrorMessage
 from lib.core.common import extractRegexResult
+from lib.core.common import filterNone
 from lib.core.common import getPublicTypeMembers
-from lib.core.common import getUnicode
+from lib.core.common import getSafeExString
 from lib.core.common import isListLike
 from lib.core.common import randomStr
 from lib.core.common import readInput
@@ -25,30 +32,43 @@ from lib.core.common import resetCookieJar
 from lib.core.common import singleTimeLogMessage
 from lib.core.common import singleTimeWarnMessage
 from lib.core.common import unArrayizeValue
+from lib.core.convert import decodeHex
+from lib.core.convert import getBytes
+from lib.core.convert import getText
+from lib.core.convert import getUnicode
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
 from lib.core.decorators import cachedmethod
+from lib.core.decorators import lockedmethod
+from lib.core.dicts import HTML_ENTITIES
 from lib.core.enums import DBMS
 from lib.core.enums import HTTP_HEADER
 from lib.core.enums import PLACE
 from lib.core.exception import SqlmapCompressionException
 from lib.core.settings import BLOCKED_IP_REGEX
 from lib.core.settings import DEFAULT_COOKIE_DELIMITER
-from lib.core.settings import DEV_EMAIL_ADDRESS
 from lib.core.settings import EVENTVALIDATION_REGEX
+from lib.core.settings import HEURISTIC_PAGE_SIZE_THRESHOLD
+from lib.core.settings import IDENTYWAF_PARSE_COUNT_LIMIT
+from lib.core.settings import IDENTYWAF_PARSE_PAGE_LIMIT
 from lib.core.settings import MAX_CONNECTION_TOTAL_SIZE
 from lib.core.settings import META_CHARSET_REGEX
 from lib.core.settings import PARSE_HEADERS_LIMIT
+from lib.core.settings import PRINTABLE_BYTES
 from lib.core.settings import SELECT_FROM_TABLE_REGEX
 from lib.core.settings import UNICODE_ENCODING
 from lib.core.settings import VIEWSTATE_REGEX
 from lib.parse.headers import headersParser
 from lib.parse.html import htmlParser
-from lib.utils.htmlentities import htmlEntities
+from thirdparty import six
 from thirdparty.chardet import detect
-from thirdparty.odict.odict import OrderedDict
+from thirdparty.identywaf import identYwaf
+from collections import OrderedDict
+from thirdparty.six import unichr as _unichr
+from thirdparty.six.moves import http_client as _http_client
 
+@lockedmethod
 def forgeHeaders(items=None, base=None):
     """
     Prepare HTTP Cookie, HTTP User-Agent and HTTP Referer headers to use when performing
@@ -57,11 +77,11 @@ def forgeHeaders(items=None, base=None):
 
     items = items or {}
 
-    for _ in items.keys():
+    for _ in list(items.keys()):
         if items[_] is None:
             del items[_]
 
-    headers = OrderedDict(base or conf.httpHeaders)
+    headers = OrderedDict(conf.httpHeaders if base is None else base)
     headers.update(items.items())
 
     class _str(str):
@@ -95,22 +115,27 @@ def forgeHeaders(items=None, base=None):
     if conf.cj:
         if HTTP_HEADER.COOKIE in headers:
             for cookie in conf.cj:
-                if cookie.domain_specified and not (conf.hostname or "").endswith(cookie.domain):
+                # Note: a domain-scoped cookie (Domain=example.com) is stored by the cookie jar as
+                # '.example.com', so a plain endswith() wrongly excludes the apex host itself
+                # ('example.com' does not end with '.example.com'); accept the exact domain too
+                if cookie is None or cookie.domain_specified and not ((conf.hostname or "").endswith(cookie.domain) or (conf.hostname or "") == cookie.domain.lstrip('.')):
                     continue
 
                 if ("%s=" % getUnicode(cookie.name)) in getUnicode(headers[HTTP_HEADER.COOKIE]):
                     if conf.loadCookies:
-                        conf.httpHeaders = filter(None, ((item if item[0] != HTTP_HEADER.COOKIE else None) for item in conf.httpHeaders))
+                        conf.httpHeaders = filterNone((item if item[0] != HTTP_HEADER.COOKIE else None) for item in conf.httpHeaders)
                     elif kb.mergeCookies is None:
-                        message = "you provided a HTTP %s header value. " % HTTP_HEADER.COOKIE
-                        message += "The target URL provided its own cookies within "
-                        message += "the HTTP %s header which intersect with yours. " % HTTP_HEADER.SET_COOKIE
+                        message = "you provided a HTTP %s header value, while " % HTTP_HEADER.COOKIE
+                        message += "target URL provides its own cookies within "
+                        message += "HTTP %s header which intersect with yours. " % HTTP_HEADER.SET_COOKIE
                         message += "Do you want to merge them in further requests? [Y/n] "
 
                         kb.mergeCookies = readInput(message, default='Y', boolean=True)
 
                     if kb.mergeCookies and kb.injection.place != PLACE.COOKIE:
-                        _ = lambda x: re.sub(r"(?i)\b%s=[^%s]+" % (re.escape(getUnicode(cookie.name)), conf.cookieDel or DEFAULT_COOKIE_DELIMITER), ("%s=%s" % (getUnicode(cookie.name), getUnicode(cookie.value))).replace('\\', r'\\'), x)
+                        def _(value):
+                            return re.sub(r"(?i)\b%s=[^%s]+" % (re.escape(getUnicode(cookie.name)), conf.cookieDel or DEFAULT_COOKIE_DELIMITER), ("%s=%s" % (getUnicode(cookie.name), getUnicode(cookie.value))).replace('\\', r'\\'), value)
+
                         headers[HTTP_HEADER.COOKIE] = _(headers[HTTP_HEADER.COOKIE])
 
                         if PLACE.COOKIE in conf.parameters:
@@ -152,6 +177,9 @@ def checkCharEncoding(encoding, warn=True):
     'utf8'
     """
 
+    if isinstance(encoding, six.binary_type):
+        encoding = getUnicode(encoding)
+
     if isListLike(encoding):
         encoding = unArrayizeValue(encoding)
 
@@ -161,7 +189,7 @@ def checkCharEncoding(encoding, warn=True):
         return encoding
 
     # Reference: http://www.destructor.de/charsets/index.htm
-    translate = {"windows-874": "iso-8859-11", "utf-8859-1": "utf8", "en_us": "utf8", "macintosh": "iso-8859-1", "euc_tw": "big5_tw", "th": "tis-620", "unicode": "utf8",  "utc8": "utf8", "ebcdic": "ebcdic-cp-be", "iso-8859": "iso8859-1", "iso-8859-0": "iso8859-1", "ansi": "ascii", "gbk2312": "gbk", "windows-31j": "cp932", "en": "us"}
+    translate = {"windows-874": "iso-8859-11", "utf-8859-1": "utf8", "en_us": "utf8", "macintosh": "iso-8859-1", "euc_tw": "big5_tw", "th": "tis-620", "unicode": "utf8", "utc8": "utf8", "ebcdic": "ebcdic-cp-be", "iso-8859": "iso8859-1", "iso-8859-0": "iso8859-1", "ansi": "ascii", "gbk2312": "gbk", "windows-31j": "cp932", "en": "us"}
 
     for delimiter in (';', ',', '('):
         if delimiter in encoding:
@@ -216,18 +244,14 @@ def checkCharEncoding(encoding, warn=True):
     # Reference: http://www.iana.org/assignments/character-sets
     # Reference: http://docs.python.org/library/codecs.html
     try:
-        codecs.lookup(encoding.encode(UNICODE_ENCODING) if isinstance(encoding, unicode) else encoding)
-    except (LookupError, ValueError):
-        if warn and ' ' not in encoding:
-            warnMsg = "unknown web page charset '%s'. " % encoding
-            warnMsg += "Please report by e-mail to '%s'" % DEV_EMAIL_ADDRESS
-            singleTimeLogMessage(warnMsg, logging.WARN, encoding)
+        codecs.lookup(encoding)
+    except (LookupError, ValueError):   # ValueError: an attacker-controlled charset with a NUL (e.g. "utf-8\x00") -> "embedded null character"
         encoding = None
 
     if encoding:
         try:
-            unicode(randomStr(), encoding)
-        except:
+            six.text_type(getBytes(randomStr()), encoding)
+        except (UnicodeDecodeError, LookupError):
             if warn:
                 warnMsg = "invalid web page charset '%s'" % encoding
                 singleTimeLogMessage(warnMsg, logging.WARN, encoding)
@@ -235,58 +259,89 @@ def checkCharEncoding(encoding, warn=True):
 
     return encoding
 
+@lockedmethod
 def getHeuristicCharEncoding(page):
     """
     Returns page encoding charset detected by usage of heuristics
-    Reference: http://chardet.feedparser.org/docs/
+
+    Reference: https://chardet.readthedocs.io/en/latest/usage.html
+
+    >>> getHeuristicCharEncoding(b"<html></html>")
+    'ascii'
+    >>> getHeuristicCharEncoding(b'<!DOCTYPE html><html><head><meta charset="windows-1251"><title>\\xd2\\xe5\\xf1\\xf2</title></head><body>\\xc2 \\xf1\\xee\\xee\\xf2\\xe2\\xe5\\xf2\\xf1\\xf2\\xe2\\xe8\\xe8 \\xf1 \\xef\\xf0\\xe8\\xed\\xf6\\xe8\\xef\\xe0\\xec\\xe8 \\xf0\\xe0\\xe1\\xee\\xf2\\xfb \\xf3\\xf2\\xe8\\xeb\\xe8\\xf2\\xfb \\xe0\\xe2\\xf2\\xee\\xec\\xe0\\xf2\\xe8\\xf7\\xe5\\xf1\\xea\\xee\\xe3\\xee \\xee\\xef\\xf0\\xe5\\xe4\\xe5\\xeb\\xe5\\xed\\xe8\\xff \\xea\\xee\\xe4\\xe8\\xf0\\xee\\xe2\\xea\\xe8, \\xed\\xe0\\xec \\xf2\\xf0\\xe5\\xe1\\xf3\\xe5\\xf2\\xf1\\xff \\xef\\xf0\\xe5\\xe4\\xee\\xf1\\xf2\\xe0\\xe2\\xe8\\xf2\\xfc \\xe7\\xed\\xe0\\xf7\\xe8\\xf2\\xe5\\xeb\\xfc\\xed\\xee \\xe1\\xee\\xeb\\xe5\\xe5 \\xe4\\xeb\\xe8\\xed\\xed\\xfb\\xe9 \\xf4\\xf0\\xe0\\xe3\\xec\\xe5\\xed\\xf2 \\xf2\\xe5\\xea\\xf1\\xf2\\xe0 \\xed\\xe0 \\xf0\\xf3\\xf1\\xf1\\xea\\xee\\xec \\xff\\xe7\\xfb\\xea\\xe5. \\xdd\\xf2\\xee \\xed\\xe5\\xee\\xb1\\xf5\\xee\\xe4\\xe8\\xec\\xee \\xe4\\xeb\\xff \\xf2\\xee\\xe3\\xee, \\xf7\\xf2\\xee\\xf1\\xfb \\xf1\\xf2\\xe0\\xf2\\xe8\\xf1\\xf2\\xe8\\xf7\\xe5\\xf1\\xea\\xe8\\xe9 \\xe0\\xed\\xe0\\xeb\\xe8\\xe7\\xe0\\xf2\\xee\\xf0 \\xf7\\xe0\\xf1\\xf2\\xee\\xf2\\xed\\xee\\xf1\\xf2\\xe8 \\xf1\\xe8\\xec\\xe2\\xee\\xeb\\xee\\xe2 \\xe8 \\xe4\\xe2\\xf3\\xf5\\xe1\\xf3\\xea\\xe2\\xe5\\xed\\xed\\xfb\\xf5 \\xf1\\xee\\xf7\\xe5\\xf2\\xe0\\xed\\xe8\\xb9 \\xf1\\xec\\xee\\xe3 \\xf1 \\xe2\\xfb\\xf1\\xee\\xea\\xee\\xb9 \\xf1\\xf2\\xe5\\xef\\xe5\\xed\\xfc\\xf2 \\xf3\\xe2\\xe5\\xf0\\xe5\\xed\\xed\\xee\\xf1\\xf2\\xe8 \\xe7\\xe0\\xf4\\xe8\\xea\\xf1\\xe8\\xf0\\xee\\xe2\\xe0\\xf2\\xfc \\xe8\\xec\\xe5\\xed\\xed\\xee \\xf1\\xf2\\xe0\\xed\\xe4\\xe0\\xf0\\xf2 Windows-1251, \\xe0 \\xed\\xe5 MacCyrillic \\xe8\\xeb\\xe8 ISO-8859-5. \\xd0\\xf3\\xf1\\xf1\\xea\\xe8\\xb9 \\xff\\xe7\\xfb\\xea \\xee\\xe1\\xbb\\xe0\\xe4\\xe0\\xe5\\xf2 \\xf3\\xed\\xe8\\xea\\xe0\\xeb\\xfc\\xed\\xfb\\xec \\xf0\\xe0\\xf1\\xef\\xf0\\xe5\\xe4\\xe5\\xeb\\xe5\\xed\\xe8\\xe5\\xec \\xe3\\xeb\\xe0\\xf1\\xed\\xfb\\xf5 \\xe8 \\xf1\\xee\\xe3\\xeb\\xe0\\xf1\\xed\\xfb\\xf5 \\xe1\\xf3\\xea\\xe2, \\xf2\\xe0\\xea\\xe8\\xf5 \\xea\\xe0\\xea \\xee, \\xe5, \\xe0, \\xe8, \\xed, \\xf2, \\xea\\xee\\xf2\\xee\\xf0\\xfb\\xe5 \\xe2 \\xf0\\xe0\\xe7\\xed\\xfb\\xf5 \\xea\\xee\\xe4\\xee\\xe2\\xfb\\xf5 \\xf1\\xf2\\xf0\\xe0\\xed\\xe8\\xf6\\xe0\\xf5 \\xe7\\xe0\\xed\\xe8\\xec\\xe0\\xf3\\xf2 \\xf1\\xee\\xe2\\xe5\\xf0\\xf8\\xe5\\xed\\xed\\xee \\xf0\\xe0\\xe7\\xed\\xfb\\xe5 \\xef\\xee\\xf7\\xe8\\xf6\\xe8\\xe8 \\xe2 \\xf2\\xe0\\xe1\\xeb\\xe8\\xf6\\xe5 \\xe1\\xe0\\xb9\\xf2\\xee\\xe2. \\xca\\xee\\xe3\\xe4\\xe0 \\xf2\\xe5\\xea\\xf1\\xf2\\xe0 \\xf1\\xf2\\xe0\\xed\\xee\\xe2\\xe8\\xf2\\xf1\\xff \\xe4\\xee\\xf1\\xf2\\xe0\\xf2\\xee\\xf7\\xed\\xee \\xec\\xed\\xee\\xe3\\xee, \\xe2\\xe5\\xf0\\xee\\xff\\xf2\\xed\\xee\\xf1\\xf2\\xfc \\xee\\xf8\\xe8\\xe1\\xea\\xe8 \\xf1\\xed\\xe8\\xe6\\xe0\\xe5\\xf2\\xf1\\xff \\xef\\xf0\\xe0\\xea\\xf2\\xe8\\xf7\\xe5\\xf1\\xea\\xe8 \\xe4\\xee \\xed\\xf3\\xeb\\xff. \\xcc\\xfb \\xe4\\xee\\xe1\\xe0\\xe2\\xeb\\xff\\xe5\\xec \\xe5\\xf9\\xe5 \\xed\\xe5\\xf1\\xea\\xee\\xeb\\xfc\\xea\\xee \\xef\\xf0\\xe5\\xe4\\xeb\\xee\\xe6\\xe5\\xed\\xe8\\xb9, \\xf7\\xf2\\xee\\xf1\\xfb \\xf0\\xe0\\xf1\\xf8\\xe8\\xf0\\xe8\\xf2\\xfc \\xe2\\xfb\\xe1\\xee\\xf0\\xea\\xf3 \\xe4\\xe0\\xed\\xed\\xfb\\xf5 \\xe4\\xeb\\xff \\xea\\xee\\xf0\\xf0\\xe5\\xea\\xf2\\xed\\xee\\xe3\\xee \\xf2\\xe5\\xf1\\xf2\\xe8\\xf0\\xee\\xe2\\xe0\\xed\\xe8\\xff \\xe2\\xe0\\xf8\\xe5\\xb9 \\xe1\\xe8\\xe1\\xeb\\xe8\\xee\\xf2\\xe5\\xea\\xe8 \\xe2 \\xf1\\xf0\\xe5\\xe4\\xe5 Python.</body></html>')
+    'windows-1251'
     """
 
-    key = hash(page)
-    retVal = kb.cache.encoding.get(key) or detect(page)["encoding"]
-    kb.cache.encoding[key] = retVal
+    key = (len(page), hash(page))
+    retVal = kb.cache.encoding.get(key)
+    if retVal is None:
+        retVal = detect(page[:HEURISTIC_PAGE_SIZE_THRESHOLD])["encoding"]
+        kb.cache.encoding[key] = retVal
 
-    if retVal:
+    if retVal and retVal.lower().replace('-', "") == UNICODE_ENCODING.lower().replace('-', ""):
         infoMsg = "heuristics detected web page charset '%s'" % retVal
         singleTimeLogMessage(infoMsg, logging.INFO, retVal)
 
     return retVal
 
-def decodePage(page, contentEncoding, contentType):
+def decodePage(page, contentEncoding, contentType, percentDecode=True):
     """
     Decode compressed/charset HTTP response
+
+    >>> getText(decodePage(b"<html>foo&amp;bar</html>", None, "text/html; charset=utf-8"))
+    '<html>foo&bar</html>'
+    >>> getText(decodePage(b"&#x9;", None, "text/html; charset=utf-8"))
+    '\\t'
+    >>> getText(decodePage(b"&#x4A;", None, "text/html; charset=utf-8"))
+    'J'
+    >>> decodePage(b"&#x2122;", None, "text/html; charset=utf-8") == u"\u2122"
+    True
     """
 
     if not page or (conf.nullConnection and len(page) < 2):
         return getUnicode(page)
 
-    if isinstance(contentEncoding, basestring) and contentEncoding:
-        contentEncoding = contentEncoding.lower()
-    else:
-        contentEncoding = ""
+    contentEncoding = getText(contentEncoding).lower() if contentEncoding else ""
+    contentType = getText(contentType).lower() if contentType else ""
 
-    if isinstance(contentType, basestring) and contentType:
-        contentType = contentType.lower()
-    else:
-        contentType = ""
-
-    if contentEncoding in ("gzip", "x-gzip", "deflate"):
+    if contentEncoding in ("gzip", "x-gzip", "deflate", "br", "zstd"):
         if not kb.pageCompress:
             return None
 
         try:
             if contentEncoding == "deflate":
-                data = StringIO.StringIO(zlib.decompress(page, -15))  # Reference: http://stackoverflow.com/questions/1089662/python-inflate-and-deflate-implementations
-            else:
-                data = gzip.GzipFile("", "rb", 9, StringIO.StringIO(page))
-                size = struct.unpack("<l", page[-4:])[0]  # Reference: http://pydoc.org/get.cgi/usr/local/lib/python2.5/gzip.py
-                if size > MAX_CONNECTION_TOTAL_SIZE:
+                obj = zlib.decompressobj(-15)
+                page = obj.decompress(page, MAX_CONNECTION_TOTAL_SIZE + 1)
+
+                # catch the deflate bomb before flush() forcefully expands it into RAM
+                if len(page) > MAX_CONNECTION_TOTAL_SIZE:
                     raise Exception("size too large")
 
-            page = data.read()
-        except Exception, msg:
-            if "<html" not in page:  # in some cases, invalid "Content-Encoding" appears for plain HTML (should be ignored)
+                page += obj.flush()
+                if len(page) > MAX_CONNECTION_TOTAL_SIZE:
+                    raise Exception("size too large")
+            elif contentEncoding == "br":
+                page = _brotli.decompress(page, MAX_CONNECTION_TOTAL_SIZE)   # in-tree RFC 7932 decoder (bomb-capped)
+            elif contentEncoding == "zstd":
+                if _zstd is None:
+                    raise Exception("no Zstandard decoder available")
+                # bounded streaming decode: cap output at MAX_CONNECTION_TOTAL_SIZE without allocating the
+                # full result first, and enforce the 8 MB window the HTTP 'zstd' coding mandates
+                decompressor = _zstd.ZstdDecompressor(options={_zstd.DecompressionParameter.window_log_max: 23})
+                page = decompressor.decompress(page, max_length=MAX_CONNECTION_TOTAL_SIZE + 1)
+                if len(page) > MAX_CONNECTION_TOTAL_SIZE:
+                    raise Exception("size too large")
+                if not decompressor.eof:
+                    raise Exception("incomplete Zstandard stream")
+            else:
+                data = gzip.GzipFile("", "rb", 9, io.BytesIO(page))
+                page = data.read(MAX_CONNECTION_TOTAL_SIZE + 1)
+                if len(page) > MAX_CONNECTION_TOTAL_SIZE:
+                    raise Exception("size too large")
+        except Exception as ex:
+            if b"<html" not in page:  # in some cases, invalid "Content-Encoding" appears for plain HTML (should be ignored)
                 errMsg = "detected invalid data for declared content "
-                errMsg += "encoding '%s' ('%s')" % (contentEncoding, msg)
+                errMsg += "encoding '%s' ('%s')" % (contentEncoding, getSafeExString(ex))
                 singleTimeLogMessage(errMsg, logging.ERROR)
 
                 warnMsg = "turning off page compression"
@@ -304,7 +359,7 @@ def decodePage(page, contentEncoding, contentType):
 
         metaCharset = checkCharEncoding(extractRegexResult(META_CHARSET_REGEX, page))
 
-        if (any((httpCharset, metaCharset)) and not all((httpCharset, metaCharset))) or (httpCharset == metaCharset and all((httpCharset, metaCharset))):
+        if (any((httpCharset, metaCharset)) and (not all((httpCharset, metaCharset)) or isinstance(page, six.binary_type) and all(_ in PRINTABLE_BYTES for _ in page))) or (httpCharset == metaCharset and all((httpCharset, metaCharset))):
             kb.pageEncoding = httpCharset or metaCharset  # Reference: http://bytes.com/topic/html-css/answers/154758-http-equiv-vs-true-header-has-precedence
             debugMsg = "declared web page charset '%s'" % kb.pageEncoding
             singleTimeLogMessage(debugMsg, logging.DEBUG, debugMsg)
@@ -314,27 +369,26 @@ def decodePage(page, contentEncoding, contentType):
         kb.pageEncoding = conf.encoding
 
     # can't do for all responses because we need to support binary files too
-    if not isinstance(page, unicode) and "text/" in contentType:
-        if kb.heuristicMode:
-            kb.pageEncoding = kb.pageEncoding or checkCharEncoding(getHeuristicCharEncoding(page))
-            page = getUnicode(page, kb.pageEncoding)
-        else:
-            # e.g. &#195;&#235;&#224;&#226;&#224;
-            if "&#" in page:
-                page = re.sub(r"&#(\d{1,3});", lambda _: chr(int(_.group(1))) if int(_.group(1)) < 256 else _.group(0), page)
+    if isinstance(page, six.binary_type) and "text/" in contentType:
+        if not kb.disableHtmlDecoding:
+            # e.g. &#x9;&#195;&#235;&#224;&#226;&#224;
+            if b"&#" in page:
+                page = re.sub(b"(?i)&#x([0-9a-f]{1,2});", lambda _: decodeHex(_.group(1) if len(_.group(1)) == 2 else b"0%s" % _.group(1)), page)
+                page = re.sub(b"&#(\\d{1,3});", lambda _: six.int2byte(int(_.group(1))) if int(_.group(1)) < 256 else _.group(0), page)
 
             # e.g. %20%28%29
-            if "%" in page:
-                page = re.sub(r"%([0-9a-fA-F]{2})", lambda _: _.group(1).decode("hex"), page)
+            if percentDecode:
+                if b"%" in page:
+                    page = re.sub(b"(?i)%([0-9a-f]{2})", lambda _: decodeHex(_.group(1)), page)
 
             # e.g. &amp;
-            page = re.sub(r"&([^;]+);", lambda _: chr(htmlEntities[_.group(1)]) if htmlEntities.get(_.group(1), 256) < 256 else _.group(0), page)
+            page = re.sub(b"&([^;]+);", lambda _: six.int2byte(HTML_ENTITIES[getText(_.group(1))]) if HTML_ENTITIES.get(getText(_.group(1)), 256) < 256 else _.group(0), page)
 
             kb.pageEncoding = kb.pageEncoding or checkCharEncoding(getHeuristicCharEncoding(page))
 
-            if kb.pageEncoding and kb.pageEncoding.lower() == "utf-8-sig":
+            if (kb.pageEncoding or "").lower() == "utf-8-sig":
                 kb.pageEncoding = "utf-8"
-                if page and page.startswith("\xef\xbb\xbf"):  # Reference: https://docs.python.org/2/library/codecs.html (Note: noticed problems when "utf-8-sig" is left to Python for handling)
+                if page and page.startswith(b"\xef\xbb\xbf"):  # Reference: https://docs.python.org/2/library/codecs.html (Note: noticed problems when "utf-8-sig" is left to Python for handling)
                     page = page[3:]
 
             page = getUnicode(page, kb.pageEncoding)
@@ -344,20 +398,31 @@ def decodePage(page, contentEncoding, contentType):
                 def _(match):
                     retVal = match.group(0)
                     try:
-                        retVal = unichr(int(match.group(1)))
-                    except ValueError:
+                        retVal = _unichr(int(match.group(1)))
+                    except (ValueError, OverflowError):
                         pass
                     return retVal
                 page = re.sub(r"&#(\d+);", _, page)
 
+                # e.g. &#x2019;&#x2026;&#x2122; (hex numeric refs >= U+0100; smaller ones already handled at byte-level)
+                def _(match):
+                    retVal = match.group(0)
+                    try:
+                        retVal = _unichr(int(match.group(1), 16))
+                    except (ValueError, OverflowError):
+                        pass
+                    return retVal
+                page = re.sub(r"(?i)&#x([0-9a-f]+);", _, page)
+
             # e.g. &zeta;
-            page = re.sub(r"&([^;]+);", lambda _: unichr(htmlEntities[_.group(1)]) if htmlEntities.get(_.group(1), 0) > 255 else _.group(0), page)
+            page = re.sub(r"&([^;]+);", lambda _: _unichr(HTML_ENTITIES[_.group(1)]) if HTML_ENTITIES.get(_.group(1), 0) > 255 else _.group(0), page)
+        else:
+            page = getUnicode(page, kb.pageEncoding)
 
     return page
 
-def processResponse(page, responseHeaders, status=None):
+def processResponse(page, responseHeaders, code=None, status=None):
     kb.processResponseCounter += 1
-
     page = page or ""
 
     parseResponse(page, responseHeaders if kb.processResponseCounter < PARSE_HEADERS_LIMIT else None, status)
@@ -372,6 +437,21 @@ def processResponse(page, responseHeaders, status=None):
 
         if msg:
             logger.warning("parsed DBMS error message: '%s'" % msg.rstrip('.'))
+
+    if not conf.skipWaf and kb.processResponseCounter < IDENTYWAF_PARSE_COUNT_LIMIT:
+        rawResponse = "%s %s %s\n%s\n%s" % (_http_client.HTTPConnection._http_vsn_str, code or "", status or "", "".join(getUnicode(responseHeaders.headers if responseHeaders else [])), page[:IDENTYWAF_PARSE_PAGE_LIMIT] if not kb.checkWafMode else page[:HEURISTIC_PAGE_SIZE_THRESHOLD])
+
+        with kb.locks.identYwaf:
+            try:
+                identYwaf.non_blind.clear()
+                if identYwaf.non_blind_check(rawResponse, silent=True):
+                    for waf in set(identYwaf.non_blind):
+                        if waf not in kb.identifiedWafs:
+                            kb.identifiedWafs.add(waf)
+                            errMsg = "WAF/IPS identified as '%s'" % identYwaf.format_name(waf)
+                            singleTimeLogMessage(errMsg, logging.CRITICAL)
+            except Exception as ex:
+                singleTimeWarnMessage("internal error occurred in WAF/IPS detection ('%s')" % getSafeExString(ex))
 
     if kb.originalPage is None:
         for regex in (EVENTVALIDATION_REGEX, VIEWSTATE_REGEX):
@@ -388,7 +468,7 @@ def processResponse(page, responseHeaders, status=None):
                             continue
 
                         conf.paramDict[PLACE.POST][name] = value
-                conf.parameters[PLACE.POST] = re.sub(r"(?i)(%s=)[^&]+" % re.escape(name), r"\g<1>%s" % re.escape(value), conf.parameters[PLACE.POST])
+                conf.parameters[PLACE.POST] = re.sub(r"(?i)(%s=)[^&]+" % re.escape(name), r"\g<1>%s" % value.replace('\\', r'\\'), conf.parameters[PLACE.POST])
 
     if not kb.browserVerification and re.search(r"(?i)browser.?verification", page or ""):
         kb.browserVerification = True
@@ -401,11 +481,16 @@ def processResponse(page, responseHeaders, status=None):
         for match in re.finditer(r"(?si)<form.+?</form>", page):
             if re.search(r"(?i)captcha", match.group(0)):
                 kb.captchaDetected = True
-                warnMsg = "potential CAPTCHA protection mechanism detected"
-                if re.search(r"(?i)<title>[^<]*CloudFlare", page):
-                    warnMsg += " (CloudFlare)"
-                singleTimeWarnMessage(warnMsg)
                 break
+
+        if re.search(r"<meta[^>]+\brefresh\b[^>]+\bcaptcha\b", page):
+            kb.captchaDetected = True
+
+        if kb.captchaDetected:
+            warnMsg = "potential CAPTCHA protection mechanism detected"
+            if re.search(r"(?i)<title>[^<]*CloudFlare", page):
+                warnMsg += " (CloudFlare)"
+            singleTimeWarnMessage(warnMsg)
 
     if re.search(BLOCKED_IP_REGEX, page):
         warnMsg = "it appears that you have been blocked by the target server"

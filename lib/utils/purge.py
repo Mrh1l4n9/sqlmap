@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
+import functools
 import os
 import random
 import shutil
@@ -12,7 +13,9 @@ import stat
 import string
 
 from lib.core.common import getSafeExString
+from lib.core.convert import getUnicode
 from lib.core.data import logger
+from lib.core.settings import PURGE_BLOCK_SIZE
 
 def purge(directory):
     """
@@ -21,7 +24,7 @@ def purge(directory):
 
     if not os.path.isdir(directory):
         warnMsg = "skipping purging of directory '%s' as it does not exist" % directory
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
         return
 
     infoMsg = "purging content of directory '%s'..." % directory
@@ -41,12 +44,25 @@ def purge(directory):
         except:
             pass
 
-    logger.debug("writing random data to files")
+    logger.debug("overwriting file contents")
     for filepath in filepaths:
         try:
             filesize = os.path.getsize(filepath)
-            with open(filepath, "w+b") as f:
-                f.write("".join(chr(random.randint(0, 255)) for _ in xrange(filesize)))
+            if filesize:
+                # Note: NIST SP 800-88 ("Clear") / DoD 5220.22-M style multi-pass in-place overwrite
+                # (zeros, ones, random) forcing each pass to disk; performed BEFORE the truncation below
+                # so the original bytes are actually overwritten and not just released to free blocks.
+                # Written in bounded blocks so peak memory stays O(PURGE_BLOCK_SIZE), not O(filesize)
+                with open(filepath, "r+b") as f:
+                    for getBlock in (lambda n: b"\x00" * n, lambda n: b"\xff" * n, lambda n: os.urandom(n)):
+                        f.seek(0)
+                        remaining = filesize
+                        while remaining > 0:
+                            count = min(PURGE_BLOCK_SIZE, remaining)
+                            f.write(getBlock(count))
+                            remaining -= count
+                        f.flush()
+                        os.fsync(f.fileno())
         except:
             pass
 
@@ -65,7 +81,7 @@ def purge(directory):
         except:
             pass
 
-    dirpaths.sort(cmp=lambda x, y: y.count(os.path.sep) - x.count(os.path.sep))
+    dirpaths.sort(key=functools.cmp_to_key(lambda x, y: y.count(os.path.sep) - x.count(os.path.sep)))
 
     logger.debug("renaming directory names to random values")
     for dirpath in dirpaths:
@@ -75,9 +91,7 @@ def purge(directory):
             pass
 
     logger.debug("deleting the whole directory tree")
-    os.chdir(os.path.join(directory, ".."))
-
     try:
         shutil.rmtree(directory)
-    except OSError, ex:
-        logger.error("problem occurred while removing directory '%s' ('%s')" % (directory, getSafeExString(ex)))
+    except OSError as ex:
+        logger.error("problem occurred while removing directory '%s' ('%s')" % (getUnicode(directory), getSafeExString(ex)))

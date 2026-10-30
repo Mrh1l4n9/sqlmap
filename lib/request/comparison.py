@@ -1,40 +1,73 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
+
+from __future__ import division
 
 import re
 
 from lib.core.common import extractRegexResult
+from lib.core.common import extractStructuralTokens
 from lib.core.common import getFilteredPageContent
+from lib.core.common import jsonMinimize
 from lib.core.common import listToStrValue
 from lib.core.common import removeDynamicContent
+from lib.core.common import getLastRequestHTTPError
 from lib.core.common import wasLastResponseDBMSError
 from lib.core.common import wasLastResponseHTTPError
+from lib.core.convert import getBytes
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
+from lib.core.enums import HTTP_HEADER
 from lib.core.exception import SqlmapNoneDataException
 from lib.core.settings import DEFAULT_PAGE_ENCODING
 from lib.core.settings import DIFF_TOLERANCE
 from lib.core.settings import HTML_TITLE_REGEX
-from lib.core.settings import MIN_RATIO
+from lib.core.settings import LOWER_RATIO_BOUND
 from lib.core.settings import MAX_DIFFLIB_SEQUENCE_LENGTH
 from lib.core.settings import MAX_RATIO
+from lib.core.settings import MIN_RATIO
 from lib.core.settings import REFLECTED_VALUE_MARKER
-from lib.core.settings import LOWER_RATIO_BOUND
 from lib.core.settings import UPPER_RATIO_BOUND
 from lib.core.settings import URI_HTTP_HEADER
 from lib.core.threads import getCurrentThreadData
+from thirdparty import six
+
+def _isJsonResponse(headers):
+    """
+    Returns True if the response Content-Type plausibly indicates a JSON document - i.e. the canonical
+    'application/json', the common misservings ('text/json', 'application/javascript', ...), or a
+    structured suffix like 'application/vnd.api+json'. Being liberal here is safe: jsonMinimize() returns
+    None for anything that is not actually parseable JSON, so a mislabelled body simply falls back to the
+    normal text comparison.
+    """
+
+    retVal = False
+
+    if headers:
+        contentType = (headers.get(HTTP_HEADER.CONTENT_TYPE) or "").split(';')[0].strip().lower()
+        retVal = contentType in ("application/json", "text/json", "application/javascript", "text/javascript", "application/x-javascript") or contentType.endswith("+json")
+
+    return retVal
 
 def comparison(page, headers, code=None, getRatioValue=False, pageLength=None):
+    if not isinstance(page, (six.text_type, six.binary_type, type(None))):
+        logger.critical("got page of type %s; repr(page)[:200]=%s" % (type(page), repr(page)[:200]))
+
+        try:
+            page = b"".join(page)
+        except:
+            page = six.text_type(page)
+
     _ = _adjust(_comparison(page, headers, code, getRatioValue, pageLength), getRatioValue)
     return _
 
 def _adjust(condition, getRatioValue):
-    if not any((conf.string, conf.notString, conf.regexp, conf.code)):
+    if not any((conf.string, conf.notString, conf.regexp, conf.code, conf.lengths)):
         # Negative logic approach is used in raw page comparison scheme as that what is "different" than original
         # PAYLOAD.WHERE.NEGATIVE response is considered as True; in switch based approach negative logic is not
         # applied as that what is by user considered as True is that what is returned by the comparison mechanism
@@ -52,6 +85,7 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
         threadData.lastComparisonHeaders = listToStrValue(_ for _ in headers.headers if not _.startswith("%s:" % URI_HTTP_HEADER)) if headers else ""
         threadData.lastComparisonPage = page
         threadData.lastComparisonCode = code
+        threadData.lastComparisonPageLength = pageLength  # NULL connection carries the length here (no body)
 
     if page is None and pageLength is None:
         return None
@@ -59,13 +93,19 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
     if any((conf.string, conf.notString, conf.regexp)):
         rawResponse = "%s%s" % (listToStrValue(_ for _ in headers.headers if not _.startswith("%s:" % URI_HTTP_HEADER)) if headers else "", page)
 
-        # String to match in page when the query is True and/or valid
+        # String to match in page when the query is True
         if conf.string:
             return conf.string in rawResponse
 
-        # String to match in page when the query is False and/or invalid
+        # String to match in page when the query is False
         if conf.notString:
-            return conf.notString not in rawResponse
+            if conf.notString in rawResponse:
+                return False
+            else:
+                if kb.errorIsNone and (wasLastResponseDBMSError() or wasLastResponseHTTPError()):
+                    return None
+                else:
+                    return True
 
         # Regular expression to match in page when the query is True and/or valid
         if conf.regexp:
@@ -75,18 +115,37 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
     if conf.code:
         return conf.code == code
 
+    # Response content length to match when the query is True (NULL connection supplies the length via
+    # pageLength with no body, so fall back to it rather than len(None)=0 which would stall the oracle)
+    if conf.lengths:
+        return (pageLength if page is None else len(page)) == kb.trueLength
+
     seqMatcher = threadData.seqMatcher
     seqMatcher.set_seq1(kb.pageTemplate)
+
+    # raw (pre-dynamic-removal) body, kept for the structured (JSON) comparison path below;
+    # parsing the raw form avoids removeDynamicContent splicing JSON mid-token
+    rawPage = page
 
     if page:
         # In case of an DBMS error page return None
         if kb.errorIsNone and (wasLastResponseDBMSError() or wasLastResponseHTTPError()) and not kb.negativeLogic:
-            return None
+            if not (wasLastResponseHTTPError() and getLastRequestHTTPError() in (conf.ignoreCode or [])):
+                return None
 
         # Dynamic content lines to be excluded before comparison
         if not kb.nullConnection:
             page = removeDynamicContent(page)
-            seqMatcher.set_seq1(removeDynamicContent(kb.pageTemplate))
+            if threadData.lastPageTemplate != kb.pageTemplate:
+                threadData.lastPageTemplateCleaned = removeDynamicContent(kb.pageTemplate)
+                # Same template-identity memoization for the structure-aware projections (see below): the
+                # template is constant across an extraction, so it must not be re-parsed/re-tokenized on
+                # every inference request - only seq2 (from the live page) is recomputed per response
+                threadData.lastPageTemplateJsonMinimized = jsonMinimize(kb.pageTemplate)
+                threadData.lastPageTemplateStructural = "\n".join(sorted(extractStructuralTokens(kb.pageTemplate)))
+                threadData.lastPageTemplate = kb.pageTemplate
+
+            seqMatcher.set_seq1(threadData.lastPageTemplateCleaned)
 
         if not pageLength:
             pageLength = len(page)
@@ -105,10 +164,10 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
     else:
         # Preventing "Unicode equal comparison failed to convert both arguments to Unicode"
         # (e.g. if one page is PDF and the other is HTML)
-        if isinstance(seqMatcher.a, str) and isinstance(page, unicode):
-            page = page.encode(kb.pageEncoding or DEFAULT_PAGE_ENCODING, "ignore")
-        elif isinstance(seqMatcher.a, unicode) and isinstance(page, str):
-            seqMatcher.a = seqMatcher.a.encode(kb.pageEncoding or DEFAULT_PAGE_ENCODING, "ignore")
+        if isinstance(seqMatcher.a, six.binary_type) and isinstance(page, six.text_type):
+            page = getBytes(page, kb.pageEncoding or DEFAULT_PAGE_ENCODING, "ignore")
+        elif isinstance(seqMatcher.a, six.text_type) and isinstance(page, six.binary_type):
+            seqMatcher.set_seq1(getBytes(seqMatcher.a, kb.pageEncoding or DEFAULT_PAGE_ENCODING, "ignore"))
 
         if any(_ is None for _ in (page, seqMatcher.a)):
             return None
@@ -124,23 +183,79 @@ def _comparison(page, headers, code, getRatioValue, pageLength):
         else:
             seq1, seq2 = None, None
 
-            if conf.titles:
-                seq1 = extractRegexResult(HTML_TITLE_REGEX, seqMatcher.a)
-                seq2 = extractRegexResult(HTML_TITLE_REGEX, page)
-            else:
-                seq1 = getFilteredPageContent(seqMatcher.a, True) if conf.textOnly else seqMatcher.a
-                seq2 = getFilteredPageContent(page, True) if conf.textOnly else page
+            # Structure-aware comparison for JSON responses: compare an order-independent
+            # projection of the parsed bodies instead of raw text, so key reordering/whitespace
+            # noise does not perturb the ratio while a changed value/array-length does. Engages
+            # only on a JSON Content-Type with both bodies parseable; any doubt (or an explicit
+            # --text-only/--titles) falls back to the exact text path below.
+            if _isJsonResponse(headers) and not (conf.titles or conf.textOnly or kb.nullConnection):
+                seq1 = threadData.lastPageTemplateJsonMinimized  # memoized per template (see above)
+                seq2 = jsonMinimize(rawPage)
+
+            # Structure-aware comparison for a structurally-stable (but byte-unstable) HTML page:
+            # compare the value-free tag/class/id skeleton so dynamic text does not perturb the ratio
+            # while a structural change (e.g. a results table appearing/disappearing) still does
+            if seq1 is None and kb.pageStructurallyStable and not (conf.titles or conf.textOnly or kb.nullConnection):
+                _ = threadData.lastPageTemplateStructural  # memoized per template (see above)
+                if _:   # only engage when the page actually exposes structure (HTML tags); tagless content falls back to text
+                    seq1 = _
+                    seq2 = "\n".join(sorted(extractStructuralTokens(rawPage)))
+
+            if seq1 is None or seq2 is None:
+                if conf.titles:
+                    seq1 = extractRegexResult(HTML_TITLE_REGEX, seqMatcher.a)
+                    seq2 = extractRegexResult(HTML_TITLE_REGEX, page)
+                else:
+                    seq1 = getFilteredPageContent(seqMatcher.a, True) if conf.textOnly else seqMatcher.a
+                    seq2 = getFilteredPageContent(page, True) if conf.textOnly else page
 
             if seq1 is None or seq2 is None:
                 return None
 
-            seq1 = seq1.replace(REFLECTED_VALUE_MARKER, "")
-            seq2 = seq2.replace(REFLECTED_VALUE_MARKER, "")
+            if isinstance(seq1, six.binary_type):
+                seq1 = seq1.replace(REFLECTED_VALUE_MARKER.encode(), b"")
+            elif isinstance(seq1, six.text_type):
+                seq1 = seq1.replace(REFLECTED_VALUE_MARKER, "")
 
-            seqMatcher.set_seq1(seq1)
-            seqMatcher.set_seq2(seq2)
+            if isinstance(seq2, six.binary_type):
+                seq2 = seq2.replace(REFLECTED_VALUE_MARKER.encode(), b"")
+            elif isinstance(seq2, six.text_type):
+                seq2 = seq2.replace(REFLECTED_VALUE_MARKER, "")
 
-            ratio = round(seqMatcher.quick_ratio(), 3)
+            if kb.heavilyDynamic:
+                seq1 = seq1.split("\n" if isinstance(seq1, six.text_type) else b"\n")
+                seq2 = seq2.split("\n" if isinstance(seq2, six.text_type) else b"\n")
+
+                key = None
+            else:
+                key = (hash(seq1), hash(seq2))
+
+            ratio = kb.cache.comparison.get(key) if key else None
+
+            if ratio is None:
+                # Note: populate the matcher only on a cache MISS - set_seq2() eagerly builds difflib's
+                # O(len(page)) b2j index, and since each response is a fresh string that whole build was
+                # thrown away on every cache hit (the common case after warmup: responses cluster into a
+                # few distinct pages). seqMatcher carries no state across calls that a hit would read.
+                try:
+                    seqMatcher.set_seq1(seq1)
+                    seqMatcher.set_seq2(seq2)
+                except:
+                    seqMatcher.set_seq1(repr(seq1))
+                    seqMatcher.set_seq2(repr(seq2))
+
+                try:
+                    try:
+                        ratio = seqMatcher.quick_ratio() if not kb.heavilyDynamic else seqMatcher.ratio()
+                    except (TypeError, MemoryError, SystemError):
+                        ratio = seqMatcher.ratio()
+                except:
+                    ratio = 0.0
+
+                ratio = round(ratio, 3)
+
+            if key:
+                kb.cache.comparison[key] = ratio
 
     # If the url is stable and we did not set yet the match ratio and the
     # current injected value changes the url page content

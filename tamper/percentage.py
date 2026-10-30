@@ -1,24 +1,24 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import os
 import string
 
-from lib.core.enums import PRIORITY
 from lib.core.common import singleTimeWarnMessage
+from lib.core.enums import PRIORITY
 
-__priority__ = PRIORITY.LOW
+__priority__ = PRIORITY.LOWEST
 
 def dependencies():
     singleTimeWarnMessage("tamper script '%s' is only meant to be run against ASP web applications" % os.path.basename(__file__).split(".")[0])
 
 def tamper(payload, **kwargs):
     """
-    Adds a percentage sign ('%') infront of each character
+    Adds a percentage sign ('%') infront of each character (e.g. SELECT -> %S%E%L%E%C%T)
 
     Requirement:
         * ASP
@@ -34,6 +34,8 @@ def tamper(payload, **kwargs):
     >>> tamper('SELECT FIELD FROM TABLE')
     '%S%E%L%E%C%T %F%I%E%L%D %F%R%O%M %T%A%B%L%E'
     """
+
+    retVal = payload
 
     if payload:
         retVal = ""

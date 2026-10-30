@@ -1,19 +1,20 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 try:
-    import cx_Oracle
-except:
+    import oracledb
+except ImportError:
     pass
 
 import logging
 import os
 
-from lib.core.convert import utf8encode
+from lib.core.common import getSafeExString
+from lib.core.convert import getText
 from lib.core.data import conf
 from lib.core.data import logger
 from lib.core.exception import SqlmapConnectionException
@@ -23,30 +24,35 @@ os.environ["NLS_LANG"] = ".AL32UTF8"
 
 class Connector(GenericConnector):
     """
-    Homepage: http://cx-oracle.sourceforge.net/
-    User guide: http://cx-oracle.sourceforge.net/README.txt
-    API: http://cx-oracle.sourceforge.net/html/index.html
-    License: http://cx-oracle.sourceforge.net/LICENSE.txt
+    Homepage: https://oracle.github.io/python-oracledb/
+    User: https://python-oracledb.readthedocs.io/en/latest/
+    License: https://github.com/oracle/python-oracledb/blob/main/LICENSE.txt
     """
-
-    def __init__(self):
-        GenericConnector.__init__(self)
 
     def connect(self):
         self.initConnection()
-        self.__dsn = cx_Oracle.makedsn(self.hostname, self.port, self.db)
-        self.__dsn = utf8encode(self.__dsn)
-        self.user = utf8encode(self.user)
-        self.password = utf8encode(self.password)
+
+        # Fetch CLOB/BLOB values directly as str/bytes instead of oracledb.LOB objects; otherwise a LOB cell
+        # reached the renderer as the repr '<oracledb.LOB object at 0x...>' (BLOB bytes are then hex-encoded
+        # by direct()'s binary handling).
+        try:
+            oracledb.defaults.fetch_lobs = False
+        except AttributeError:
+            pass
+
+        self.user = getText(self.user)
+        self.password = getText(self.password)
 
         try:
-            self.connector = cx_Oracle.connect(dsn=self.__dsn, user=self.user, password=self.password, mode=cx_Oracle.SYSDBA)
+            dsn = oracledb.makedsn(self.hostname, self.port, service_name=self.db)
+            self.connector = oracledb.connect(user=self.user, password=self.password, dsn=dsn, mode=oracledb.AUTH_MODE_SYSDBA)
             logger.info("successfully connected as SYSDBA")
-        except (cx_Oracle.OperationalError, cx_Oracle.DatabaseError, cx_Oracle.InterfaceError):
+        except oracledb.DatabaseError:
+            # Try again without SYSDBA
             try:
-                self.connector = cx_Oracle.connect(dsn=self.__dsn, user=self.user, password=self.password)
-            except (cx_Oracle.OperationalError, cx_Oracle.DatabaseError, cx_Oracle.InterfaceError), msg:
-                raise SqlmapConnectionException(msg)
+                self.connector = oracledb.connect(user=self.user, password=self.password, dsn=dsn)
+            except oracledb.DatabaseError as ex:
+                raise SqlmapConnectionException(ex)
 
         self.initCursor()
         self.printConnected()
@@ -54,21 +60,20 @@ class Connector(GenericConnector):
     def fetchall(self):
         try:
             return self.cursor.fetchall()
-        except cx_Oracle.InterfaceError, msg:
-            logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) %s" % msg)
+        except oracledb.InterfaceError as ex:
+            logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) '%s'" % getSafeExString(ex))
             return None
 
     def execute(self, query):
         retVal = False
 
         try:
-            self.cursor.execute(utf8encode(query))
+            self.cursor.execute(getText(query))
             retVal = True
-        except cx_Oracle.DatabaseError, msg:
-            logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) %s" % msg)
+        except oracledb.DatabaseError as ex:
+            logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) '%s'" % getSafeExString(ex))
 
         self.connector.commit()
-
         return retVal
 
     def select(self, query):

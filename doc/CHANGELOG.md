@@ -1,9 +1,171 @@
+# Version 2.0 (WIP)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.10...master)
+
+## Injection techniques
+
+* Added the switch `--nosql`. It tests for NoSQL injection. It also dumps the data that it finds.
+* Added the switch `--xpath`. It tests for XPath injection.
+* Added the switch `--ldap`. It tests for LDAP injection.
+* Added the switch `--ssti`. It tests for server-side template injection. It also covers Struts2 and OGNL.
+* Added the switch `--graphql`. It tests for GraphQL injection.
+* Added the switch `--hql`. It tests for HQL and JPQL (Hibernate ORM) injection.
+* Added the switch `--sparql`. It tests for SPARQL injection in triple stores (Apache Jena, Virtuoso, Blazegraph, GraphDB). It confirms the finding with a SPARQL-only construct and then blindly dumps the predicates and the triple objects of the default graph.
+* Added the switch `--odata`. It tests for OData `$filter` injection (Microsoft OData, Apache Olingo). It confirms the finding with an OData-only function, tells the version apart, and blindly dumps the entities, including the properties that the endpoint does not return.
+* Added the switch `--xslt`. It tests for XSLT injection. The engine names itself in the response. sqlmap then dumps the XML document that the stylesheet transforms. It also reads the files that the engine can reach. When the engine exposes an extension bridge (PHP `php:function` or the Xalan `java:` namespace), sqlmap reads any file through it, and with `--os-cmd` or `--os-shell` it runs operating system commands.
+* Added the switch `--xxe`. It tests for XML External Entity injection. It uses in-band, error-based, and out-of-band channels.
+* Added the switch `--jwt`. It examines JSON Web Tokens for weak keys and for injection in the claims.
+* sqlmap now offers to get around a WAF/IPS on its own. Once it identifies one and the ordinary payloads come back blocked, it drops the scanner fingerprint and tries the tamper scripts that suit that WAF, and it keeps the first one that brings the injection back.
+
+## Speed
+
+* Added the switch `--timeless`. It reads each blind bit from the HTTP/2 response order. It does not use a delay. sqlmap calibrates the target first, and it uses the usual time-based technique if the target is not applicable.
+* Added the switch `--multi-bit`. On a page that renders rows, one request reads a bit from each row that comes back instead of a single bit altogether.
+* Added set-membership (Huffman) retrieval for blind dumps. It needs fewer requests for each character. Use `--no-huffman` to stop it.
+* Added keyset (seek) pagination for blind table dumps. Use `--no-keyset` to stop it.
+* Added parallel retrieval of values in blind mode. Each thread retrieves a different value.
+* Made Keep-Alive the default. Use the switch `--no-keep-alive` to stop it.
+* Added the reuse of HTTP/2 connections.
+* Added the switch `--lengths`. It compares the pages only by the content length.
+* Made the HashDB operations faster.
+* Made the tamper script `luanginxmore` much faster.
+
+## Targets and results
+
+* Added the option `--openapi`. It makes the list of targets from an OpenAPI or Swagger document. The options `--openapi-base` and `--openapi-tags` limit that list.
+* Added the switch `--mine-params`. It finds hidden GET parameters.
+* Added the switch `--proof`. It proves the exploitation of each injection point that it finds.
+* Added the option `--report-json`. It writes the results of the run to a JSON file.
+* Added the switch `--procs`. It retrieves the stored procedures and their source code.
+* Added the option `--exclude`. It gives the databases that sqlmap must not enumerate.
+* Added JSONL as a dump format.
+* Added the use of sqlmap as a library.
+* Added experimental support for gRPC-Web (text) requests.
+* Improved the crawler. It now finds the endpoints in JavaScript files.
+
+## Back-end DBMS
+
+* Added support for SAP HANA.
+* Added support for Snowflake.
+* Added support for Google Cloud Spanner.
+* Added support for DuckDB and Trino as forks.
+* Added the switch `--esperanto`. It enumerates a back-end DBMS that sqlmap cannot identify.
+* Added XQuery support to the switch `--xpath`. XQuery is a superset of XPath, so the same injection point gives more. On a back-end that supports it, sqlmap reads a file through `unparsed-text()`.
+* Added error-based payloads for CUBRID, InterSystems Cache, Virtuoso, H2, Firebird, and Vertica.
+* Added time-based payloads for CUBRID.
+* Added out-of-band DNS channels for H2 and ClickHouse.
+* Added PostgreSQL command execution through a PL extension.
+* Added the running of non-query statements without stacked queries through a gadget. On PostgreSQL, when the `dblink` extension is there and the current user can run it, `--sql-query`, `--file-write`, `--os-cmd`, and `--os-shell` now work from a plain (e.g. boolean-based) injection point.
+* Added file read and file write support for SQLite through the `fileio` extension functions `readfile` and `writefile`.
+* Added the data access and the security type of a routine to the output of `--procs` on MySQL and PostgreSQL, so a routine that runs as its definer or that modifies data stands out.
+* Added stacked query payloads for Microsoft SQL Server and Sybase that carry no semicolon, so a filtered semicolon alone no longer hides the technique.
+* Added the error signatures that tell the MySQL and the PostgreSQL forks apart: Doris, StarRocks, CockroachDB, YugabyteDB, OpenGauss, DuckDB, and Trino. These forks keep the wording of the engine that they come from, so only a leaked driver package or an engine-internal source reference gives them away.
+* Made the fingerprinting payloads friendlier to a WAF, so the version detection survives where it used to get blocked.
+* Added the tamper scripts `blindbinary`, `castprefix`, `dollarquote`, `infoschema2innodb`, `mid2leftright`, `mssqlnosemicolon`, `odbcbrace`, `oraclequote`, `quote2ltat`, `sign`, `sleep2hex`, and `uniontable`.
+
+## Fewer dependencies
+
+* Added an HTTP/2 client. It uses only the standard library.
+* Added WebSocket support. It uses only the standard library.
+* Added the decoding of Brotli and Zstandard responses. It uses only the standard library.
+* Added Kerberos and Negotiate authentication. It uses only the standard library.
+* Added NTLM authentication. This removed a deprecated third-party library.
+* Rewrote the Keep-Alive handler. This removed the third-party package `keepalive`.
+* Removed the third-party packages `multipart`, `odict`, and `prettyprint`.
+* Replaced SocksiPy with PySocks.
+
+## Security
+
+* Removed all use of `pickle`. sqlmap now uses JSON for the session data and for the other serialized data.
+* The REST API now requires authentication credentials.
+* Put the `eval` behavior behind the environment variable `SQLMAP_UNSAFE_EVAL`.
+* Put the option `--alert` behind the environment variable `SQLMAP_UNSAFE_ALERT`.
+* Hardened the Brotli and the Zstandard decoders against hostile input.
+
+## Correctness
+
+* Made the boolean inference more reliable when the network has much jitter.
+* Added automatic recovery when the page charset and the data charset do not agree.
+* sqlmap now finds binary fields automatically in blind mode.
+* Added support for the response code 429 (rate limit).
+* Corrected the retrieval of UTF8MB4 characters from MySQL.
+* Corrected the Set-Cookie behavior in redirections. Added support for domain cookies.
+* sqlmap now keeps the value of an injected Host header.
+* Removed the time outliers from the time statistics.
+* Improved the detection of the SQL dialect of the target.
+* The switch `--xpath` no longer reports an injection when the page changes only because it shows the payload again. Reflection is not proof that an expression was evaluated.
+* sqlmap now makes sure that the random markers around the retrieved data are all different. Two equal markers made the error-based technique give back the wrong character.
+* Made the heuristic hints of the non-SQL switches exclusive. A signature no longer matches the errors of a different engine, an ordinary SQL error, or a page that only contains the name of a template engine.
+* Corrected the GraphQL validation signatures. They now match the quotes in the way that the JSON body escapes them.
+* Added the error signatures of Mako and of DynamoDB. sqlmap did not recognise the errors of these two back-ends.
+* sqlmap no longer stops with an exception on a JWT whose signature is not valid base64url. Such a signature can not be an HMAC that sqlmap could verify, so it is reported as not crackable instead.
+* Corrected the uppercasing of the keywords in the shown queries. A word that merely contains a keyword (e.g. a table named `selected`) and a keyword inside a quoted string are now left alone.
+* Corrected the cracking of the old Oracle password hashes when the user name or the password does not come in as text.
+* sqlmap now skips a UNION test whose request holds no character instead of stopping with an exception. Only a hand-edited `payloads/union_query.xml` can hold such a test.
+* The gadget check now runs the gadget itself instead of only looking for the extension. A user that can not use it no longer gets a false success.
+
+## Quality
+
+* Added a unit test suite. It has more than 90 modules, and it runs on Python 2 and Python 3.
+* Added pyflakes and more self-test stages to the CI/CD pipeline.
+* Added `doc/ARCHITECTURE.md`.
+
+# Version 1.10 (2026-01-01)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.9...1.10)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/11?closed=1)
+
+# Version 1.9 (2025-01-02)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.8...1.9)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/10?closed=1)
+
+# Version 1.8 (2024-01-03)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.7...1.8)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/9?closed=1)
+
+# Version 1.7 (2023-01-02)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.6...1.7)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/8?closed=1)
+
+# Version 1.6 (2022-01-03)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.5...1.6)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/7?closed=1)
+
+# Version 1.5 (2021-01-03)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.4...1.5)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/6?closed=1)
+
+# Version 1.4 (2020-01-01)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.3...1.4)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/5?closed=1)
+
+# Version 1.3 (2019-01-05)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.2...1.3)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/4?closed=1)
+
+# Version 1.2 (2018-01-08)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.1...1.2)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/3?closed=1)
+
+# Version 1.1 (2017-04-07)
+
+* [View changes](https://github.com/sqlmapproject/sqlmap/compare/1.0...1.1)
+* [View issues](https://github.com/sqlmapproject/sqlmap/milestone/2?closed=1)
+
 # Version 1.0 (2016-02-27)
 
 * Implemented support for automatic decoding of page content through detected charset.
 * Implemented mechanism for proper data dumping on DBMSes not supporting `LIMIT/OFFSET` like mechanism(s) (e.g. Microsoft SQL Server, Sybase, etc.).
 * Major improvements to program stabilization based on user reports.
-* Added new tampering scripts avoiding popular WAF/IPS/IDS mechanisms.
+* Added new tampering scripts avoiding popular WAF/IPS mechanisms.
 * Fixed major bug with DNS leaking in Tor mode.
 * Added wordlist compilation made of the most popular cracking dictionaries.
 * Implemented multi-processor hash cracking routine(s).
@@ -23,7 +185,7 @@
 * Added option `--csv-del` for manually setting delimiting character used in CSV output.
 * Added switch `--hex` for using DBMS hex conversion function(s) for data retrieval.
 * Added switch `--smart` for conducting through tests only in case of positive heuristic(s).
-* Added switch `--check-waf` for checking of existence of WAF/IPS/IDS protection.
+* Added switch `--check-waf` for checking of existence of WAF/IPS protection.
 * Added switch `--schema` to enumerate DBMS schema: shows all columns of all databases' tables.
 * Added switch `--count` to count the number of entries for a specific table or all database(s) tables.
 * Major improvements to switches `--tables` and `--columns`.
@@ -55,7 +217,7 @@
 * Added option `--host` to set the HTTP Host header value.
 * Added switch `--hostname` to turn on retrieval of DBMS server hostname.
 * Added switch `--hpp` to turn on the usage of HTTP parameter pollution WAF bypass method.
-* Added switch `--identify-waf` for turning on the thorough testing of WAF/IPS/IDS protection.
+* Added switch `--identify-waf` for turning on the thorough testing of WAF/IPS protection.
 * Added switch `--ignore-401` to ignore HTTP Error Code 401 (Unauthorized).
 * Added switch `--invalid-bignum` for usage of big numbers while invalidating values.
 * Added switch `--invalid-logical` for usage of logical operations while invalidating values.
@@ -78,7 +240,7 @@
 * Added option `--skip` to skip testing of given parameter(s).
 * Added switch `--skip-static` to skip testing parameters that not appear to be dynamic.
 * Added switch `--skip-urlencode` to skip URL encoding of payload data.
-* Added switch `--skip-waf` to skip heuristic detection of WAF/IPS/IDS protection.
+* Added switch `--skip-waf` to skip heuristic detection of WAF/IPS protection.
 * Added switch `--smart` to conduct thorough tests only if positive heuristic(s).
 * Added option `--sql-file` for setting file(s) holding SQL statements to be executed (in case of stacked SQLi).
 * Added switch `--sqlmap-shell` to turn on interactive sqlmap shell prompt.
@@ -151,7 +313,7 @@
 * Major code cleanup.
 * Added simple file encryption/compression utility, extra/cloak/cloak.py, used by sqlmap to decrypt on the fly Churrasco, UPX executable and web shells consequently reducing drastically the number of anti-virus software that mistakenly mark sqlmap as a malware.
 * Updated user's manual.
-* Created several demo videos, hosted on YouTube (http://www.youtube.com/user/inquisb) and linked from http://sqlmap.org/demo.html.
+* Created several demo videos, hosted on YouTube (http://www.youtube.com/user/inquisb) and linked from https://sqlmap.org/demo.html.
 
 # Version 0.8 release candidate (2009-09-21)
 
@@ -323,7 +485,7 @@
 * Added Microsoft SQL Server extensive DBMS fingerprint checks based upon accurate '@@version' parsing matching on an XML file to get also the exact patching level of the DBMS;
 * Added support for query ETA (Estimated Time of Arrival) real time calculation (`--eta`);
 * Added support to extract database management system users password hash on MySQL and PostgreSQL (`--passwords`);
-* Added docstrings to all functions, classes and methods, consequently released the sqlmap development documentation <http://sqlmap.org/dev/>;
+* Added docstrings to all functions, classes and methods, consequently released the sqlmap development documentation <https://sqlmap.org/dev/>;
 * Implemented Google dorking feature (`-g`) to take advantage of Google results affected by SQL injection to perform other command line argument on their DBMS;
 * Improved logging functionality: passed from banal 'print' to Python native logging library;
 * Added support for more than one parameter in `-p` command line option;

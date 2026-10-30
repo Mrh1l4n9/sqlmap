@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -13,8 +13,7 @@ __priority__ = PRIORITY.LOWEST
 
 def tamper(payload, **kwargs):
     """
-    Unicode-escapes non-encoded characters in a given payload (not
-    processing already encoded)
+    Unicode-escapes non-encoded characters in a given payload (not processing already encoded) (e.g. SELECT -> \u0053\u0045\u004C\u0045\u0043\u0054)
 
     Notes:
         * Useful to bypass weak filtering and/or WAFs in JSON contexes
@@ -34,7 +33,13 @@ def tamper(payload, **kwargs):
                 retVal += "\\u00%s" % payload[i + 1:i + 3]
                 i += 3
             else:
-                retVal += '\\u%.4X' % ord(payload[i])
+                ordinal = ord(payload[i])
+                if ordinal > 0xFFFF:
+                    # non-BMP: emit a UTF-16 surrogate pair (a bare 5-hex '\uXXXXX' is invalid)
+                    ordinal -= 0x10000
+                    retVal += "\\u%04X\\u%04X" % (0xD800 + (ordinal >> 10), 0xDC00 + (ordinal & 0x3FF))
+                else:
+                    retVal += "\\u%04X" % ordinal
                 i += 1
 
     return retVal

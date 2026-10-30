@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
+import re
+
 from lib.core.common import filterPairValues
+from lib.core.common import isListLike
 from lib.core.common import isTechniqueAvailable
-from lib.core.common import randomStr
 from lib.core.common import readInput
 from lib.core.common import safeSQLIdentificatorNaming
 from lib.core.common import unArrayizeValue
@@ -27,18 +29,16 @@ from lib.core.settings import CURRENT_DB
 from lib.utils.brute import columnExists
 from lib.utils.pivotdumptable import pivotDumpTable
 from plugins.generic.enumeration import Enumeration as GenericEnumeration
+from thirdparty import six
+from thirdparty.six.moves import zip as _zip
 
 class Enumeration(GenericEnumeration):
-    def __init__(self):
-        GenericEnumeration.__init__(self)
-
     def getUsers(self):
         infoMsg = "fetching database users"
         logger.info(infoMsg)
 
         rootQuery = queries[DBMS.SYBASE].users
 
-        randStr = randomStr()
         query = rootQuery.inband.query
 
         if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
@@ -47,19 +47,19 @@ class Enumeration(GenericEnumeration):
             blinds = (True,)
 
         for blind in blinds:
-            retVal = pivotDumpTable("(%s) AS %s" % (query, randStr), ['%s.name' % randStr], blind=blind)
+            retVal = pivotDumpTable("(%s) AS %s" % (query, kb.aliasName), ['%s.name' % kb.aliasName], blind=blind, alias=kb.aliasName)
 
             if retVal:
-                kb.data.cachedUsers = retVal[0].values()[0]
+                kb.data.cachedUsers = list(retVal[0].values())[0]
                 break
 
         return kb.data.cachedUsers
 
-    def getPrivileges(self, *args):
+    def getPrivileges(self, *args, **kwargs):
         warnMsg = "on Sybase it is not possible to fetch "
         warnMsg += "database users privileges, sqlmap will check whether "
         warnMsg += "or not the database users are database administrators"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         users = []
         areAdmins = set()
@@ -94,7 +94,6 @@ class Enumeration(GenericEnumeration):
         logger.info(infoMsg)
 
         rootQuery = queries[DBMS.SYBASE].dbs
-        randStr = randomStr()
         query = rootQuery.inband.query
 
         if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
@@ -103,10 +102,10 @@ class Enumeration(GenericEnumeration):
             blinds = [True]
 
         for blind in blinds:
-            retVal = pivotDumpTable("(%s) AS %s" % (query, randStr), ['%s.name' % randStr], blind=blind)
+            retVal = pivotDumpTable("(%s) AS %s" % (query, kb.aliasName), ['%s.name' % kb.aliasName], blind=blind, alias=kb.aliasName)
 
             if retVal:
-                kb.data.cachedDbs = retVal[0].values()[0]
+                kb.data.cachedDbs = next(six.itervalues(retVal[0]))
                 break
 
         if kb.data.cachedDbs:
@@ -131,10 +130,10 @@ class Enumeration(GenericEnumeration):
         for db in dbs:
             dbs[dbs.index(db)] = safeSQLIdentificatorNaming(db)
 
-        dbs = filter(None, dbs)
+        dbs = [_ for _ in dbs if _]
 
         infoMsg = "fetching tables for database"
-        infoMsg += "%s: %s" % ("s" if len(dbs) > 1 else "", ", ".join(db if isinstance(db, basestring) else db[0] for db in sorted(dbs)))
+        infoMsg += "%s: %s" % ("s" if len(dbs) > 1 else "", ", ".join(db if isinstance(db, six.string_types) else db[0] for db in sorted(dbs)))
         logger.info(infoMsg)
 
         if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
@@ -146,12 +145,11 @@ class Enumeration(GenericEnumeration):
 
         for db in dbs:
             for blind in blinds:
-                randStr = randomStr()
-                query = rootQuery.inband.query % db
-                retVal = pivotDumpTable("(%s) AS %s" % (query, randStr), ['%s.name' % randStr], blind=blind)
+                query = rootQuery.inband.query % ((db,) * 7)
+                retVal = pivotDumpTable("(%s) AS %s" % (query, kb.aliasName), ['%s.name' % kb.aliasName], blind=blind, alias=kb.aliasName)
 
                 if retVal:
-                    for table in retVal[0].values()[0]:
+                    for table in next(six.itervalues(retVal[0])):
                         if db not in kb.data.cachedTables:
                             kb.data.cachedTables[db] = [table]
                         else:
@@ -171,12 +169,12 @@ class Enumeration(GenericEnumeration):
                 warnMsg = "missing database parameter. sqlmap is going "
                 warnMsg += "to use the current database to enumerate "
                 warnMsg += "table(s) columns"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
             conf.db = self.getCurrentDb()
 
         elif conf.db is not None:
-            if  ',' in conf.db:
+            if ',' in conf.db:
                 errMsg = "only one database name is allowed when enumerating "
                 errMsg += "the tables' columns"
                 raise SqlmapMissingMandatoryOptionException(errMsg)
@@ -188,8 +186,8 @@ class Enumeration(GenericEnumeration):
         else:
             colList = []
 
-        if conf.excludeCol:
-            colList = [_ for _ in colList if _ not in conf.excludeCol.split(',')]
+        if conf.exclude:
+            colList = [_ for _ in colList if re.search(conf.exclude, _, re.I) is None]
 
         for col in colList:
             colList[colList.index(col)] = safeSQLIdentificatorNaming(col)
@@ -200,9 +198,9 @@ class Enumeration(GenericEnumeration):
             self.getTables()
 
             if len(kb.data.cachedTables) > 0:
-                tblList = kb.data.cachedTables.values()
+                tblList = list(six.itervalues(kb.data.cachedTables))
 
-                if isinstance(tblList[0], (set, tuple, list)):
+                if tblList and isListLike(tblList[0]):
                     tblList = tblList[0]
             else:
                 errMsg = "unable to retrieve the tables "
@@ -210,7 +208,7 @@ class Enumeration(GenericEnumeration):
                 raise SqlmapNoneDataException(errMsg)
 
         for tbl in tblList:
-            tblList[tblList.index(tbl)] = safeSQLIdentificatorNaming(tbl)
+            tblList[tblList.index(tbl)] = safeSQLIdentificatorNaming(tbl, True)
 
         if bruteForce:
             resumeAvailable = False
@@ -267,9 +265,9 @@ class Enumeration(GenericEnumeration):
                 return {conf.db: kb.data.cachedColumns[conf.db]}
 
             if dumpMode and colList:
-                table = {}
-                table[safeSQLIdentificatorNaming(tbl)] = dict((_, None) for _ in colList)
-                kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = table
+                if safeSQLIdentificatorNaming(conf.db) not in kb.data.cachedColumns:
+                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = {}
+                kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)][safeSQLIdentificatorNaming(tbl, True)] = dict((_, None) for _ in colList)
                 continue
 
             infoMsg = "fetching columns "
@@ -278,19 +276,19 @@ class Enumeration(GenericEnumeration):
             logger.info(infoMsg)
 
             for blind in blinds:
-                randStr = randomStr()
-                query = rootQuery.inband.query % (conf.db, conf.db, conf.db, conf.db, conf.db, conf.db, conf.db, unsafeSQLIdentificatorNaming(tbl))
-                retVal = pivotDumpTable("(%s) AS %s" % (query, randStr), ['%s.name' % randStr, '%s.usertype' % randStr], blind=blind)
+                query = rootQuery.inband.query % (conf.db, conf.db, conf.db, conf.db, conf.db, safeSQLIdentificatorNaming(tbl, True))
+                retVal = pivotDumpTable("(%s) AS %s" % (query, kb.aliasName), ['%s.name' % kb.aliasName, '%s.usertype' % kb.aliasName], blind=blind, alias=kb.aliasName)
 
                 if retVal:
                     table = {}
                     columns = {}
 
-                    for name, type_ in filterPairValues(zip(retVal[0]["%s.name" % randStr], retVal[0]["%s.usertype" % randStr])):
-                        columns[name] = SYBASE_TYPES.get(int(type_) if isinstance(type_, basestring) and type_.isdigit() else type_, type_)
+                    for name, type_ in filterPairValues(_zip(retVal[0]["%s.name" % kb.aliasName], retVal[0]["%s.usertype" % kb.aliasName])):
+                        columns[name] = SYBASE_TYPES.get(int(type_) if hasattr(type_, "isdigit") and type_.isdigit() else type_, type_)
 
-                    table[safeSQLIdentificatorNaming(tbl)] = columns
-                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = table
+                    if safeSQLIdentificatorNaming(conf.db) not in kb.data.cachedColumns:
+                        kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = {}
+                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)][safeSQLIdentificatorNaming(tbl, True)] = columns
 
                     break
 
@@ -298,26 +296,32 @@ class Enumeration(GenericEnumeration):
 
     def searchDb(self):
         warnMsg = "on Sybase searching of databases is not implemented"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []
 
     def searchTable(self):
         warnMsg = "on Sybase searching of tables is not implemented"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []
 
     def searchColumn(self):
         warnMsg = "on Sybase searching of columns is not implemented"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []
 
     def search(self):
         warnMsg = "on Sybase search option is not available"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     def getHostname(self):
         warnMsg = "on Sybase it is not possible to enumerate the hostname"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
+
+    def getStatements(self):
+        warnMsg = "on Sybase it is not possible to enumerate the SQL statements"
+        logger.warning(warnMsg)
+
+        return []

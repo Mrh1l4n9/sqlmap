@@ -1,35 +1,44 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
-import os
 import re
 
-from lib.core.common import singleTimeWarnMessage
-from lib.core.enums import DBMS
 from lib.core.enums import PRIORITY
 
 __priority__ = PRIORITY.HIGHEST
 
 def dependencies():
-    singleTimeWarnMessage("tamper script '%s' is unlikely to work against %s" % (os.path.basename(__file__).split(".")[0], DBMS.PGSQL))
+    pass
 
 def tamper(payload, **kwargs):
     """
-    Replaces all occurrences of operator equal ('=') with operator 'LIKE'
+    Replaces all occurrences of operator equal ('=') with 'LIKE' counterpart
+
+    Requirement:
+        * MySQL
+        * MariaDB
+        * SQLite
+        * Microsoft SQL Server
+        * Oracle
 
     Tested against:
-        * Microsoft SQL Server 2005
-        * MySQL 4, 5.0 and 5.5
+        * MySQL 8.4.9
+        * MariaDB 11.8.8
+        * SQLite 3.45.1
+        * Microsoft SQL Server 2022
+        * Oracle 23ai
 
     Notes:
         * Useful to bypass weak and bespoke web application firewalls that
           filter the equal character ('=')
-        * The LIKE operator is SQL standard. Hence, this tamper script
-          should work against all (?) databases
+        * NOT usable against PostgreSQL, which refuses to compare a numeric
+          operand with LIKE (e.g. '1 LIKE 1' raises 'operator does not exist:
+          integer ~~ integer'), unlike the engines listed above which coerce
+          the operands to text
 
     >>> tamper('SELECT * FROM users WHERE id=1')
     'SELECT * FROM users WHERE id LIKE 1'
@@ -38,6 +47,6 @@ def tamper(payload, **kwargs):
     retVal = payload
 
     if payload:
-        retVal = re.sub(r"\s*=\s*", " LIKE ", retVal)
+        retVal = re.sub(r"\s*(?<![<>!=])=(?!=)\s*", " LIKE ", retVal)  # Note: skipping compound operators (e.g. >=, <=, !=)
 
     return retVal

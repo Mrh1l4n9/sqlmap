@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -12,6 +12,7 @@ from xml.sax.handler import ContentHandler
 from lib.core.common import Backend
 from lib.core.common import parseXmlFile
 from lib.core.common import sanitizeStr
+from lib.core.common import singleTimeWarnMessage
 from lib.core.data import kb
 from lib.core.data import paths
 from lib.core.enums import DBMS
@@ -26,7 +27,7 @@ class MSSQLBannerHandler(ContentHandler):
     def __init__(self, banner, info):
         ContentHandler.__init__(self)
 
-        self._banner = sanitizeStr(banner)
+        self._banner = sanitizeStr(banner or "")
         self._inVersion = False
         self._inServicePack = False
         self._release = None
@@ -53,16 +54,16 @@ class MSSQLBannerHandler(ContentHandler):
         elif name == "servicepack":
             self._inServicePack = True
 
-    def characters(self, data):
+    def characters(self, content):
         if self._inVersion:
-            self._version += sanitizeStr(data)
+            self._version += sanitizeStr(content)
         elif self._inServicePack:
-            self._servicePack += sanitizeStr(data)
+            self._servicePack += sanitizeStr(content)
 
     def endElement(self, name):
         if name == "signature":
             for version in (self._version, self._versionAlt):
-                if version and re.search(r" %s[\.\ ]+" % re.escape(version), self._banner):
+                if version and self._banner and re.search(r" %s[\.\ ]+" % re.escape(version), self._banner):
                     self._feedInfo("dbmsRelease", self._release)
                     self._feedInfo("dbmsVersion", self._version)
                     self._feedInfo("dbmsServicePack", self._servicePack)
@@ -103,13 +104,17 @@ def bannerParser(banner):
     if not xmlfile:
         return
 
-    if Backend.isDbms(DBMS.MSSQL):
-        handler = MSSQLBannerHandler(banner, kb.bannerFp)
-        parseXmlFile(xmlfile, handler)
+    try:
+        if Backend.isDbms(DBMS.MSSQL):
+            handler = MSSQLBannerHandler(banner, kb.bannerFp)
+            parseXmlFile(xmlfile, handler)
 
-        handler = FingerprintHandler(banner, kb.bannerFp)
-        parseXmlFile(paths.GENERIC_XML, handler)
-    else:
-        handler = FingerprintHandler(banner, kb.bannerFp)
-        parseXmlFile(xmlfile, handler)
-        parseXmlFile(paths.GENERIC_XML, handler)
+            handler = FingerprintHandler(banner, kb.bannerFp)
+            parseXmlFile(paths.GENERIC_XML, handler)
+        else:
+            handler = FingerprintHandler(banner, kb.bannerFp)
+            parseXmlFile(xmlfile, handler)
+            parseXmlFile(paths.GENERIC_XML, handler)
+    except Exception:
+        # best-effort banner fingerprinting - a broken/patched xml.sax must not abort the scan (see #6086)
+        singleTimeWarnMessage("unable to parse the DBMS banner for version fingerprinting")

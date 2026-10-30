@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -11,7 +11,7 @@ from lib.core.data import logger
 from lib.core.enums import OS
 from lib.core.exception import SqlmapUndefinedMethod
 
-class Fingerprint:
+class Fingerprint(object):
     """
     This class defines generic fingerprint functionalities for plugins.
     """
@@ -40,7 +40,7 @@ class Fingerprint:
     def userChooseDbmsOs(self):
         warnMsg = "for some reason sqlmap was unable to fingerprint "
         warnMsg += "the back-end DBMS operating system"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         msg = "do you want to provide the OS? [(W)indows/(l)inux]"
 
@@ -55,4 +55,4 @@ class Fingerprint:
                 break
             else:
                 warnMsg = "invalid value"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)

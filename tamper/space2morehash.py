@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import os
-import re
 import random
+import re
 import string
 
 from lib.core.common import singleTimeWarnMessage
+from lib.core.compat import xrange
 from lib.core.data import kb
 from lib.core.enums import DBMS
 from lib.core.enums import PRIORITY
@@ -23,8 +24,7 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Replaces space character (' ') with a pound character ('#') followed by
-    a random string and a new line ('\n')
+    Replaces (MySQL) instances of space character (' ') with a pound character ('#') followed by a random string and a new line ('\n')
 
     Requirement:
         * MySQL >= 5.1.13
@@ -39,7 +39,7 @@ def tamper(payload, **kwargs):
 
     >>> random.seed(0)
     >>> tamper('1 AND 9227=9227')
-    '1%23ngNvzqu%0AAND%23nVNaVoPYeva%0A%23lujYFWfv%0A9227=9227'
+    '1%23RcDKhIr%0AAND%23upgPydUzKpMX%0A%23lgbaxYjWJ%0A9227=9227'
     """
 
     def process(match):
@@ -54,15 +54,25 @@ def tamper(payload, **kwargs):
     retVal = ""
 
     if payload:
-        payload = re.sub(r"(?<=\W)(?P<word>[A-Za-z_]+)(?=\W|\Z)", lambda match: process(match), payload)
+        payload = re.sub(r"(?:^|(?<=\W))(?P<word>[A-Za-z_]+)(?=[^\w(]|\Z)", process, payload)
+
+        quote, doublequote = False, False
 
         for i in xrange(len(payload)):
-            if payload[i].isspace():
-                randomStr = ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase) for _ in xrange(random.randint(6, 12)))
-                retVal += "%%23%s%%0A" % randomStr
-            elif payload[i] == '#' or payload[i:i + 3] == '-- ':
-                retVal += payload[i:]
-                break
+            if payload[i] == '\'' and (i == 0 or payload[i - 1] != '\\'):
+                quote = not quote
+            elif payload[i] == '"' and (i == 0 or payload[i - 1] != '\\'):
+                doublequote = not doublequote
+
+            if not quote and not doublequote:
+                if payload[i].isspace():
+                    randomStr = ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase) for _ in xrange(random.randint(6, 12)))
+                    retVal += "%%23%s%%0A" % randomStr
+                elif payload[i] == '#' or payload[i:i + 3] == '-- ':
+                    retVal += payload[i:]
+                    break
+                else:
+                    retVal += payload[i]
             else:
                 retVal += payload[i]
 

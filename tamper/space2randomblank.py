@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import random
 
+from lib.core.compat import xrange
 from lib.core.enums import PRIORITY
 
 __priority__ = PRIORITY.LOW
@@ -16,8 +17,7 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Replaces space character (' ') with a random blank character from a
-    valid set of alternate characters
+    Replaces space character (' ') with a random blank character from a valid set of alternate characters
 
     Tested against:
         * Microsoft SQL Server 2005
@@ -30,7 +30,7 @@ def tamper(payload, **kwargs):
 
     >>> random.seed(0)
     >>> tamper('SELECT id FROM users')
-    'SELECT%0Did%0DFROM%0Ausers'
+    'SELECT%0Did%0CFROM%0Ausers'
     """
 
     # ASCII table:
@@ -52,10 +52,10 @@ def tamper(payload, **kwargs):
                     retVal += random.choice(blanks)
                     continue
 
-            elif payload[i] == '\'':
+            elif payload[i] == '\'' and (i == 0 or payload[i - 1] != '\\'):
                 quote = not quote
 
-            elif payload[i] == '"':
+            elif payload[i] == '"' and (i == 0 or payload[i - 1] != '\\'):
                 doublequote = not doublequote
 
             elif payload[i] == ' ' and not doublequote and not quote:

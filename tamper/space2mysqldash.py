@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import os
 
 from lib.core.common import singleTimeWarnMessage
+from lib.core.compat import xrange
 from lib.core.enums import DBMS
 from lib.core.enums import PRIORITY
 
@@ -18,14 +19,11 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Replaces space character (' ') with a dash comment ('--') followed by
-    a new line ('\n')
+    Replaces space character (' ') with a dash comment ('--') followed by a new line ('\n')
 
     Requirement:
         * MySQL
         * MSSQL
-
-    Tested against:
 
     Notes:
         * Useful to bypass several web application firewalls.
@@ -37,12 +35,22 @@ def tamper(payload, **kwargs):
     retVal = ""
 
     if payload:
+        quote, doublequote = False, False
+
         for i in xrange(len(payload)):
-            if payload[i].isspace():
-                retVal += "--%0A"
-            elif payload[i] == '#' or payload[i:i + 3] == '-- ':
-                retVal += payload[i:]
-                break
+            if payload[i] == '\'' and (i == 0 or payload[i - 1] != '\\'):
+                quote = not quote
+            elif payload[i] == '"' and (i == 0 or payload[i - 1] != '\\'):
+                doublequote = not doublequote
+
+            if not quote and not doublequote:
+                if payload[i].isspace():
+                    retVal += "--%0A"
+                elif payload[i] == '#' or payload[i:i + 3] == '-- ':
+                    retVal += payload[i:]
+                    break
+                else:
+                    retVal += payload[i]
             else:
                 retVal += payload[i]
 

